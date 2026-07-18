@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Controls</title>
+<!-- Content Security Policy: allow inline scripts/styles but forbid unsafe-eval -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https:; connect-src 'self' http://127.0.0.1:11434 http://localhost:11434 http: https:; img-src 'self' data:; object-src 'none';">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: rgba(8, 10, 14, 0.92);
+    --border: rgba(255, 255, 255, 0.07);
+    --accent: #63ffb4;
+    --text: #e8edf5;
+    --text-dim: rgba(232, 237, 245, 0.4);
+    --mono: 'JetBrains Mono', monospace;
+  }
+
+  html, body {
+    background: transparent;
+    font-family: var(--mono);
+    color: var(--text);
+    user-select: none;
+    width: 100%;
+    height: 100%;
+  }
+
+  #panel {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    -webkit-app-region: drag;
+    backdrop-filter: blur(20px);
+    box-shadow: 0 16px 40px rgba(0,0,0,0.5);
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    -webkit-app-region: no-drag;
+  }
+
+  label {
+    font-size: 9px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    width: 60px;
+    flex-shrink: 0;
+  }
+
+  input[type="range"] {
+    flex: 1;
+    accent-color: var(--accent);
+    height: 3px;
+    cursor: pointer;
+  }
+
+  .value {
+    font-size: 9px;
+    color: var(--accent);
+    width: 28px;
+    text-align: right;
+  }
+
+  .hint {
+    font-size: 8px;
+    color: rgba(255,255,255,0.15);
+    text-align: center;
+    letter-spacing: 0.08em;
+    -webkit-app-region: drag;
+  }
+</style>
+</head>
+<body>
+<div id="panel">
+  <div class="row">
+    <label>Opacity</label>
+    <input type="range" id="opacity-slider" min="20" max="100" value="93" oninput="updateOpacity(this.value)">
+    <span class="value" id="opacity-val">93%</span>
+  </div>
+  <div class="hint">⟳ Drag to reposition • Ctrl+Shift+H to hide</div>
+</div>
+
+<script>
+if (typeof dragEvent === 'undefined') window.dragEvent = null;
+</script>
+<script>
+const { ipcRenderer } = require('electron');
+
+function updateOpacity(val) {
+  document.getElementById('opacity-val').textContent = val + '%';
+  ipcRenderer.send('set-opacity', val / 100);
+}
+</script>
+</body>
+</html>

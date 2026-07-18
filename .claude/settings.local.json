@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ollama --version)",
+      "Bash(ollama list *)"
+    ]
+  }
+}
