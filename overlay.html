@@ -918,11 +918,13 @@ let silenceTimer   = null;
 let vadRafId       = null;
 let recMime        = '';
 let speechStartTime = 0;   // timestamp when current utterance began
+let lastSttRequestTs = 0;
 
 const VOICE_THRESHOLD  = 15;  // energy level above which we consider the user to be speaking 
-const SILENCE_MS_SHORT = 800;   // silence after a long question  (≥2 s speech) → fire fast
-const SILENCE_MS_LONG  = 1800;   // silence after a short fragment (<2 s speech) → small buffer
-
+const SILENCE_MS_SHORT = 1000;   // silence after a long question  (≥2 s speech) → fire fast
+const SILENCE_MS_LONG  = 2200;   // silence after a short fragment (<2 s speech) → small buffer
+const MIN_STT_INTERVAL_MS = 3000; // don't send more than one STT request every 6 seconds
+const MIN_TRANSCRIBE_DURATION_S = 1.0; // ignore very short fragments
 async function toggleListen() {
   if (listening) { stopListening(); return; }
 
@@ -1068,8 +1070,18 @@ function vadLoop(ts) {
         setVoiceStatus('capturing internal audio', 'live');
         updateLiveTranscript('Transcribing…');
 
+        const now = Date.now();
+        if (now - lastSttRequestTs < MIN_STT_INTERVAL_MS) {
+          showOnScreen('Skipping extra STT request to reduce traffic');
+          updateLiveTranscript('');
+          return;
+        }
+
         const clip = await flushRecorder();
-        if (clip.length && listening) transcribeAndAsk(clip);
+        if (clip.length && listening) {
+          lastSttRequestTs = Date.now();
+          transcribeAndAsk(clip);
+        }
       }, waitMs);
     }
   }
