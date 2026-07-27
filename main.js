@@ -339,14 +339,13 @@ ipcMain.on('screen-analyze', async (event, { id, images, text }) => {
         'You are an expert coding and technical interview assistant. ' +
         'When given a screenshot your ONLY job is: ' +
         '(1) Find the exact question, coding problem, or code visible in the image. ' +
-        '(2) Provide a complete, correct answer — working code with step-by-step explanation. ' +
+        '(2) Provide a complete, correct answer- Keep explanations short and scannable' +
         '(3) If the image shows code with bugs, list every bug and give the fixed code. ' +
         'NEVER describe the screenshot. Just answer the question directly.\n\n' +
         'FORMATTING (mandatory for fast reading):\n' +
         '- **bold** every key term, algorithm name, pattern, and critical fact\n' +
         '- **bold** all complexity values like **O(n log n)**\n' +
-        '- Use ```lang code blocks``` for all code\n' +
-        '- Keep explanations short and scannable'
+        '- Use ```lang code blocks``` for all code\n' 
     };
 
     // User message: all images + focused instruction
@@ -364,11 +363,13 @@ ipcMain.on('screen-analyze', async (event, { id, images, text }) => {
     ];
 
     const body = JSON.stringify({
-      model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+      model: 'qwen/qwen3.6-27b',
       messages: [systemMsg, { role: 'user', content: userContent }],
       max_tokens: 4096,
       temperature: 0.1,
-      stream: true
+      stream: true,
+      reasoning_effort: 'none' 
+
     });
 
     await new Promise((resolve, reject) => {
