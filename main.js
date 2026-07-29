@@ -1,15 +1,18 @@
 const { app, BrowserWindow, globalShortcut, ipcMain, screen, Tray, Menu, nativeImage, session, desktopCapturer } = require('electron');
 const path = require('path');
 const https = require('https');
-const Cerebras = require('@cerebras/cerebras_cloud_sdk');
 
 // ── API KEYS ──────────────────────────────────────
-// ── API KEYS push for git remove the keys ──────────────────────────────────────
-const CEREBRAS_API_KEY = process.env.CEREBRAS_API_KEY || '';
-const GROQ_API_KEY     = process.env.GROQ_API_KEY || '';
+// User-supplied via the renderer's settings dropdown (see 'set-api-keys'
+// below) take priority; env vars are just a fallback for local dev.
+let CEREBRAS_API_KEY = process.env.CEREBRAS_API_KEY || '';
+let GROQ_API_KEY     = process.env.GROQ_API_KEY || '';
 let cerebrasClient = null;
 function getCerebrasClient() {
   if (!cerebrasClient) {
+    // Deferred until the first chat request — this SDK alone takes ~300ms to
+    // require(), which used to run unconditionally before the window even opened.
+    const Cerebras = require('@cerebras/cerebras_cloud_sdk');
     cerebrasClient = new Cerebras({ apiKey: CEREBRAS_API_KEY });
   }
   return cerebrasClient;
@@ -48,6 +51,11 @@ function createOverlayWindow() {
 
   overlayWindow.loadFile('overlay.html');
   if (process.env.OPEN_DEVTOOLS) overlayWindow.webContents.openDevTools({ mode: 'detach' });
+  if (process.env.DEBUG_CONSOLE) {
+    overlayWindow.webContents.on('console-message', (e, level, message, line, sourceId) => {
+      console.log(`[renderer] ${message} (${sourceId}:${line})`);
+    });
+  }
 
   // WDA_EXCLUDEFROMCAPTURE = 0x00000011 — invisible in screen share / recording
   overlayWindow.setContentProtection(true);
@@ -103,11 +111,6 @@ function toggleOverlay() {
   }
   isOverlayVisible = !isOverlayVisible;
 }
-
-
-// Suppress GPU disk cache errors (benign Chromium warnings)
-app.commandLine.appendSwitch('disable-gpu-cache');
-app.commandLine.appendSwitch('disable-software-rasterizer');
 
 // APP LIFECYCLE
 // ─────────────────────────────────────────────
@@ -254,6 +257,18 @@ ipcMain.on('resize-overlay', (event, { width, height }) => {
 
 ipcMain.on('set-opacity', (event, opacity) => {
   if (overlayWindow) overlayWindow.setOpacity(opacity);
+});
+
+// Renderer's settings dropdown pastes in the user's own keys — used for
+// AI answers (Cerebras) and voice-to-text + screenshot analysis (Groq).
+ipcMain.on('set-api-keys', (event, { cerebrasApiKey, groqApiKey } = {}) => {
+  if (typeof cerebrasApiKey === 'string' && cerebrasApiKey !== CEREBRAS_API_KEY) {
+    CEREBRAS_API_KEY = cerebrasApiKey;
+    cerebrasClient = null; // force getCerebrasClient() to rebuild with the new key
+  }
+  if (typeof groqApiKey === 'string') {
+    GROQ_API_KEY = groqApiKey;
+  }
 });
 
 
