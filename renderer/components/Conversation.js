@@ -19,7 +19,7 @@ function Conversation({ store, containerRef }) {
   return html`
     <div id="conversation" ref=${containerRef} style=${collapsed ? 'display:none' : ''}>
       ${ids.length === 0
-        ? html`<${EmptyState} />`
+        ? html`<${EmptyState} store=${store} />`
         : ids.map(id => html`<${Message} key=${id} store=${store} id=${id} />`)}
     </div>
   `;
