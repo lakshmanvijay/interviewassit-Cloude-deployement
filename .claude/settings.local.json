@@ -2,7 +2,13 @@
   "permissions": {
     "allow": [
       "Bash(ollama --version)",
-      "Bash(ollama list *)"
+      "Bash(ollama list *)",
+      "Bash(git status *)",
+      "Bash(ls -la \"c:/Users/Windows-E/Downloads/ai/\" 2>&1)",
+      "Read(//c/Users/Windows-E/Downloads/ai/**)",
+      "Bash(git checkout *)",
+      "Bash(node -e \"const p=require\\('pdf-parse'\\); console.log\\(typeof p, Object.keys\\(p\\)\\)\")",
+      "Bash(node -e \"JSON.parse\\(require\\('fs'\\).readFileSync\\('package.json','utf8'\\)\\); console.log\\('package.json OK'\\)\")"
     ]
   }
 }

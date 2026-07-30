@@ -24,6 +24,10 @@
   "build": {
     "appId": "com.stealth.interview",
     "productName": "InterviewAssist",
+    "protocols": {
+      "name": "InterviewAssist Auth Callback",
+      "schemes": ["interviewassist"]
+    },
     "win": {
       "target": "nsis",
       "icon": "assets/icon.ico"

@@ -1,6 +1,44 @@
-const { app, BrowserWindow, globalShortcut, ipcMain, screen, Tray, Menu, nativeImage, session, desktopCapturer } = require('electron');
+const { app, BrowserWindow, globalShortcut, ipcMain, screen, Tray, Menu, nativeImage, session, desktopCapturer, shell } = require('electron');
 const path = require('path');
+const http = require('http');
 const https = require('https');
+
+// ── DEEP-LINK PROTOCOL REGISTRATION ───────────────
+// Must happen before app.whenReady() — this is what lets the OS hand
+// myapp://callback?token=... URLs back to this app after the system
+// browser finishes the web login.
+const PROTOCOL = 'interviewassist';
+if (process.defaultApp) {
+  // Running unpackaged (e.g. `electron .`) — needs the exact exec path + script arg.
+  if (process.argv.length >= 2) {
+    app.setAsDefaultProtocolClient(PROTOCOL, process.execPath, [path.resolve(process.argv[1])]);
+  }
+} else {
+  app.setAsDefaultProtocolClient(PROTOCOL);
+}
+
+// Windows/Linux deliver the deep link as an argv on a new launch — since the
+// OS would otherwise just spawn a second copy of the app, claim a single
+// instance lock and forward the URL to the already-running instance instead.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (event, commandLine) => {
+    if (overlayWindow) {
+      if (overlayWindow.isMinimized()) overlayWindow.restore();
+      overlayWindow.focus();
+    }
+    const url = commandLine.find(arg => arg.startsWith(`${PROTOCOL}://`));
+    if (url) handleAuthCallback(url);
+  });
+}
+
+// macOS delivers deep links via this event instead of argv.
+app.on('open-url', (event, url) => {
+  event.preventDefault();
+  handleAuthCallback(url);
+});
 
 // ── API KEYS ──────────────────────────────────────
 // User-supplied via the renderer's settings dropdown (see 'set-api-keys'
@@ -21,6 +59,39 @@ function getCerebrasClient() {
 let overlayWindow = null;
 let tray = null;
 let isOverlayVisible = true;
+
+// ── LOGIN (system-browser + deep-link hand-off) ───
+// "Login" opens the real web login page in the user's system browser
+// (never inside an Electron window) with a redirect param pointing back at
+// our custom protocol. After the user authenticates there, the browser
+// redirects to interviewassist://callback?token=..., the OS hands that URL
+// to this app (see the deep-link registration above), and the token is used
+// to fetch the account from the backend.
+const WEB_LOGIN_URL = process.env.INTERVIEWASSIST_WEB_LOGIN_URL || 'http://localhost:5173/login';
+const LOGIN_API_URL = process.env.INTERVIEWASSIST_LOGIN_API_URL || 'http://localhost:8080/api/auth/login';
+let sessionToken = null;
+
+// Resume text extracted from account.resume (a PDF URL), used to ground
+// answers about the candidate's background/previous projects. Truncated to
+// keep prompt size sane; parsing failures (non-PDF, unreachable) just leave
+// this empty rather than breaking login.
+const RESUME_TEXT_MAX_CHARS = 6000;
+let resumeText = '';
+
+async function parseResume(url) {
+  try {
+    // Deferred require — same "only pay the cost when actually needed"
+    // convention used for the Cerebras SDK above.
+    const { PDFParse } = require('pdf-parse');
+    const parser = new PDFParse({ url });
+    const result = await parser.getText();
+    await parser.destroy();
+    return (result.text || '').slice(0, RESUME_TEXT_MAX_CHARS);
+  } catch (e) {
+    console.error('[resume] parse failed:', e.message);
+    return '';
+  }
+}
 
 // ─────────────────────────────────────────────
 // CREATE THE HIDDEN OVERLAY WINDOW
@@ -75,6 +146,77 @@ function createOverlayWindow() {
   });
 }
 
+// Called with the raw interviewassist://callback?token=... URL, whether it
+// arrived via 'open-url' (macOS), 'second-instance' (Windows/Linux, already
+// running), or process.argv on a cold launch. Extracts the token and uses it
+// to fetch the account from the backend.
+function handleAuthCallback(rawUrl) {
+  let token;
+  try {
+    token = new URL(rawUrl).searchParams.get('token');
+  } catch (e) {
+    console.error('[login] malformed callback URL:', rawUrl);
+    return;
+  }
+  if (!token) return;
+
+  sessionToken = token;
+  fetchAccountFromApi(token)
+    .then(account => {
+      if (!account) return;
+      if (overlayWindow) overlayWindow.webContents.send('account-received', account);
+
+      if (account.resume) {
+        parseResume(account.resume).then(text => {
+          resumeText = text;
+          if (text && overlayWindow) overlayWindow.webContents.send('resume-parsed', text);
+        });
+      }
+    })
+    .catch(e => console.error('[login] failed to fetch account from API:', e.message));
+}
+
+// Response shape isn't fully known — handled defensively as either
+// { user: {...} } or the user object directly.
+function fetchAccountFromApi(token) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(LOGIN_API_URL);
+    const lib = url.protocol === 'https:' ? https : http;
+    const body = JSON.stringify({ token });
+    console.log(`[login] POST ${url.toString()} (token: ${token.slice(0, 12)}…)`);
+    const req = lib.request({
+      hostname: url.hostname,
+      port: url.port || (url.protocol === 'https:' ? 443 : 80),
+      path: url.pathname + url.search,
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body)
+      }
+    }, res => {
+      let data = '';
+      res.on('data', c => (data += c));
+      res.on('end', () => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          return reject(new Error(`Login API returned ${res.statusCode}: ${data.slice(0, 500)}`));
+        }
+        try {
+          const parsed = JSON.parse(data);
+          const user = parsed.user || parsed;
+          const { password, ...account } = user;
+          resolve(account);
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+    req.write(body);
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 
 // ─────────────────────────────────────────────
 // SYSTEM TRAY
@@ -124,6 +266,11 @@ app.whenReady().then(() => {
 
   createOverlayWindow();
   createTray();
+
+  // Cold launch via the deep link on Windows/Linux (not already running,
+  // so there's no 'second-instance' event) — the URL arrives as an argv.
+  const launchUrl = process.argv.find(arg => arg.startsWith(`${PROTOCOL}://`));
+  if (launchUrl) handleAuthCallback(launchUrl);
 
   // Ctrl+M — intercept native minimize, redirect to custom collapse
   globalShortcut.register('CommandOrControl+M', () => {
@@ -275,6 +422,24 @@ ipcMain.on('set-api-keys', (event, { cerebrasApiKey, groqApiKey } = {}) => {
 ipcMain.handle('get-window-position', () => {
   if (overlayWindow) return overlayWindow.getPosition();
   return [0, 0];
+});
+
+// Opens the real web login page in the user's system browser (never inside
+// an Electron window) with a redirect param pointing back at our custom
+// protocol — see the deep-link registration + handleAuthCallback() above.
+ipcMain.on('start-login', () => {
+  const url = new URL(WEB_LOGIN_URL);
+  url.searchParams.set('redirect', `${PROTOCOL}://callback`);
+  shell.openExternal(url.toString());
+});
+
+// No local session/cookie store to clear here anymore — login now happens
+// in the user's own system browser, not an Electron-hosted window. Logging
+// out of the web app itself (if desired) has to happen in that browser.
+ipcMain.on('logout', () => {
+  sessionToken = null;
+  resumeText = '';
+  if (overlayWindow) overlayWindow.webContents.send('logged-out');
 });
 
 // Returns screen sources so the renderer can use chromeMediaSource:'desktop'

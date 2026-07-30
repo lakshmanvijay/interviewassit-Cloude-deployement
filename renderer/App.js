@@ -58,8 +58,8 @@ function App({ store }) {
     // History is captured *before* the assistant placeholder is appended,
     // so it never includes the in-flight streaming answer.
     const history = store.getState().conversation.slice(-2).map(m => ({ role: m.role, content: m.content }));
-    const { mode, model } = store.getState();
-    const messages = [{ role: 'system', content: getSystemPrompt(mode) }, ...history];
+    const { mode, model, resumeText } = store.getState();
+    const messages = [{ role: 'system', content: getSystemPrompt(mode, resumeText) }, ...history];
 
     const assistantId = genId();
     store.setState(s => ({ conversation: [...s.conversation, { id: assistantId, role: 'assistant', content: '', streaming: true }] }));
@@ -240,6 +240,9 @@ function App({ store }) {
       'nav-next-question':      () => questionNavRef.current.navigateQuestion(+1),
       'jump-to-first-question': () => questionNavRef.current.jumpToQuestion(0),
       'jump-to-last-question':  () => questionNavRef.current.jumpToQuestion(Infinity),
+      'account-received':       (_, account) => store.setState({ account }),
+      'resume-parsed':          (_, text) => store.setState({ resumeText: text }),
+      'logged-out':             () => store.setState({ account: null, resumeText: '' }),
     };
     Object.entries(listeners).forEach(([ch, fn]) => ipcRenderer.on(ch, fn));
 

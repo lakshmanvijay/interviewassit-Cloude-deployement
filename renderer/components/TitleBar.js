@@ -7,6 +7,7 @@ function TitleBar({ store, onToggleListen, onCaptureScreenshot, onClear, onCopy,
   const collapsed     = useStoreSlice(store, s => s.collapsed);
   const opacity       = useStoreSlice(store, s => s.opacity);
   const settingsOpen  = useStoreSlice(store, s => s.settingsOpen);
+  const account       = useStoreSlice(store, s => s.account);
 
   return html`
     <div id="titlebar">
@@ -32,11 +33,11 @@ function TitleBar({ store, onToggleListen, onCaptureScreenshot, onClear, onCopy,
         <button class="icon-btn" onClick=${onClear} title="⟳ Clear  [Ctrl+Shift+C]">⟳</button>
         <button class="icon-btn" onClick=${onCopy} title="⎘ Copy answer  [Ctrl+Shift+X]">⎘</button>
         <button
-          class="icon-btn ${settingsOpen ? 'active' : ''}"
+          class="icon-btn avatar-btn ${settingsOpen ? 'active' : ''}"
           id="settings-gear-btn"
           onClick=${onToggleSettings}
-          title="⚙ API keys"
-        >⚙</button>
+          title=${account ? account.name : 'Account'}
+        >${account ? account.name.charAt(0).toUpperCase() : '?'}</button>
         <div class="opacity-wrap" title="Opacity  [Ctrl+Shift+[  /  ]]">
           <span>👁</span>
           <input

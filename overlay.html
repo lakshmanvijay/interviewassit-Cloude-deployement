@@ -120,6 +120,12 @@
     background: rgba(99,255,180,0.12);
     border-color: rgba(99,255,180,0.35); color: var(--accent);
   }
+  .avatar-btn, .avatar-btn.active {
+    border: none; border-radius: 50%;
+    background: #E8963C; color: #fff;
+    font-weight: 700; font-size: 11px;
+  }
+  .avatar-btn:hover, .avatar-btn.active:hover { background: #d6852c; color: #fff; }
 
   /* ── SETTINGS PANEL (API keys dropdown) ── */
   #settings-panel {
@@ -129,6 +135,19 @@
     border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,0.55);
     display: flex; flex-direction: column; gap: 10px;
   }
+  .account-header {
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+    padding-bottom: 10px; border-bottom: 1px solid var(--border); text-align: center;
+  }
+  .settings-avatar {
+    width: 40px; height: 40px; border-radius: 50%;
+    background: #E8963C; color: #fff; font-weight: 700; font-size: 16px;
+    display: flex; align-items: center; justify-content: center;
+    margin-bottom: 2px;
+  }
+  .account-name { font-size: 12px; font-weight: 600; color: var(--text); }
+  .account-email { font-size: 9px; color: var(--text-dim); }
+  .account-header .settings-ok-btn { align-self: stretch; margin-top: 4px; }
   .settings-row { display: flex; flex-direction: column; gap: 4px; }
   .settings-row label {
     font-size: 9px; color: var(--text-dimmer);
@@ -193,6 +212,38 @@
     background: var(--accent); transition: width .05s, background .1s;
   }
   #vad-fill.hot { background: var(--live); }
+
+  /* ── LOGIN SECTION (sits above the shortcut list in the empty state) ── */
+  .login-section {
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    width: 100%; padding: 14px 16px;
+    background: rgba(255,255,255,0.03); border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .login-title {
+    font-size: 11px; font-weight: 700; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--accent);
+  }
+  .login-sub { font-size: 9px; color: var(--text-dim); }
+  .login-btn {
+    width: 100%; font-family: var(--mono); font-size: 10px; font-weight: 600;
+    padding: 8px 10px; border-radius: 6px; border: 1px solid rgba(99,255,180,0.3);
+    background: rgba(99,255,180,0.1); color: var(--accent);
+    cursor: pointer; transition: all .15s;
+  }
+  .login-btn:hover { background: rgba(99,255,180,0.18); border-color: rgba(99,255,180,0.5); }
+  .account-plan {
+    font-size: 8px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--accent); background: rgba(99,255,180,0.1);
+    border: 1px solid rgba(99,255,180,0.3); border-radius: 10px; padding: 2px 8px;
+  }
+  .account-resume { font-size: 9px; color: var(--accent2); cursor: pointer; margin-top: 2px; }
+  .account-resume:hover { text-decoration: underline; }
+  .logout-btn {
+    margin-top: 6px; border-color: var(--border);
+    background: rgba(255,255,255,0.04); color: var(--text-dim);
+  }
+  .logout-btn:hover { background: rgba(255,95,114,0.12); border-color: rgba(255,95,114,0.3); color: var(--danger); }
 
   /* ── CONVERSATION ── */
   #conversation {

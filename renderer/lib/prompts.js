@@ -23,8 +23,16 @@ Bold the most important facts and numbers.
 ${BOLD_RULE}`
 };
 
-function getSystemPrompt(mode) {
-  return SYSTEM_PROMPTS[mode];
+function getSystemPrompt(mode, resumeText) {
+  const base = SYSTEM_PROMPTS[mode];
+  if (!resumeText) return base;
+
+  return `${base}
+
+CANDIDATE RESUME CONTEXT — only use this when asked about the candidate's personal background, work history, education, or previous projects. For general technical/coding interview questions, ignore it and answer normally.
+"""
+${resumeText}
+"""`;
 }
 
 module.exports = { SYSTEM_PROMPTS, getSystemPrompt };
