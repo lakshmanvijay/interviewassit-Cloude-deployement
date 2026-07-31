@@ -29,7 +29,10 @@ function getSystemPrompt(mode, resumeText) {
 
   return `${base}
 
-CANDIDATE RESUME CONTEXT — only use this when asked about the candidate's personal background, work history, education, or previous projects. For general technical/coding interview questions, ignore it and answer normally.
+CANDIDATE RESUME CONTEXT — this is the candidate's real background. Use it to ground every answer, not just personal-background questions:
+- If the question is about the candidate (background, work history, education, skills, previous projects), answer directly from this resume.
+- For technical/coding questions, still give the correct answer, but where relevant tailor it to the candidate's actual experience — reference real technologies, projects, or skills from the resume instead of generic examples.
+- If the resume doesn't contain something needed to answer, say so rather than inventing details.
 """
 ${resumeText}
 """`;

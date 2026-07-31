@@ -1,5 +1,6 @@
 const { app, BrowserWindow, globalShortcut, ipcMain, screen, Tray, Menu, nativeImage, session, desktopCapturer, shell } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const http = require('http');
 const https = require('https');
 
@@ -78,15 +79,37 @@ let sessionToken = null;
 const RESUME_TEXT_MAX_CHARS = 6000;
 let resumeText = '';
 
+// Plain http/https GET into a Buffer — same raw-request style already used
+// elsewhere in this file (Groq calls, the login API).
+function fetchBuffer(url) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const lib = parsed.protocol === 'https:' ? https : http;
+    lib.get(parsed, res => {
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        return reject(new Error(`Resume fetch returned ${res.statusCode}`));
+      }
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+    }).on('error', reject);
+  });
+}
+
 async function parseResume(url) {
   try {
+    console.log(`[resume] fetching + parsing: ${url}`);
     // Deferred require — same "only pay the cost when actually needed"
-    // convention used for the Cerebras SDK above.
-    const { PDFParse } = require('pdf-parse');
-    const parser = new PDFParse({ url });
-    const result = await parser.getText();
-    await parser.destroy();
-    return (result.text || '').slice(0, RESUME_TEXT_MAX_CHARS);
+    // convention used for the Cerebras SDK above. pdf-parse@1.x is a plain
+    // text extractor with no DOM/canvas dependency, unlike 2.x (which wraps
+    // pdf.js and needs browser globals like DOMMatrix that don't exist in
+    // Electron's bundled Node runtime).
+    const pdfParse = require('pdf-parse');
+    const buffer = await fetchBuffer(url);
+    const result = await pdfParse(buffer);
+    const text = (result.text || '').slice(0, RESUME_TEXT_MAX_CHARS);
+    console.log(`[resume] extracted ${text.length} chars:\n${text}`);
+    return text;
   } catch (e) {
     console.error('[resume] parse failed:', e.message);
     return '';
@@ -198,6 +221,16 @@ function fetchAccountFromApi(token) {
       let data = '';
       res.on('data', c => (data += c));
       res.on('end', () => {
+        console.log(`[login] backend response (${res.statusCode}):`, data);
+        try {
+          fs.writeFileSync(
+            path.join(app.getPath('userData'), 'login-response.json'),
+            data
+          );
+        } catch (e) {
+          console.error('[login] failed to write login-response.json:', e.message);
+        }
+
         if (res.statusCode < 200 || res.statusCode >= 300) {
           return reject(new Error(`Login API returned ${res.statusCode}: ${data.slice(0, 500)}`));
         }
@@ -205,6 +238,7 @@ function fetchAccountFromApi(token) {
           const parsed = JSON.parse(data);
           const user = parsed.user || parsed;
           const { password, ...account } = user;
+          console.log('[login] resolved account:', account);
           resolve(account);
         } catch (e) {
           reject(e);
@@ -466,6 +500,7 @@ ipcMain.on('cerebras-chat', async (event, { id, model, messages }) => {
       model: model || 'llama3.1-8b',
       messages,
       stream: true,
+      stream_options: { include_usage: true },
       max_completion_tokens: 900,
       temperature: 0.1,
       top_p: 1,
@@ -475,6 +510,15 @@ ipcMain.on('cerebras-chat', async (event, { id, model, messages }) => {
       clearTimeout(timeout);
       const delta = chunk.choices?.[0]?.delta?.content;
       if (delta && !wc.isDestroyed()) wc.send('cerebras-chunk', { id, delta });
+      // The system prompt (base instructions + resume text) is a stable,
+      // byte-identical prefix across turns in the same session, so Cerebras'
+      // own KV-cache reuse (same mechanism as OpenAI's automatic prompt
+      // caching — no special request shape needed) kicks in on its own.
+      // This just makes that reuse visible instead of invisible.
+      if (chunk.usage) {
+        const cached = chunk.usage.prompt_tokens_details?.cached_tokens || 0;
+        console.log(`[cerebras] prompt_tokens=${chunk.usage.prompt_tokens} cached_tokens=${cached}`);
+      }
     }
     if (!wc.isDestroyed()) wc.send('cerebras-done', { id });
   } catch (err) {
