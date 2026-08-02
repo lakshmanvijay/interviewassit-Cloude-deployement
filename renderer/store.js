@@ -45,6 +45,8 @@ const store = createStore({
   settingsOpen: false,
   account: null,   // { id, name, email, provider, avatar, plan, joinedAt, resume } once received from the web app's login, or null
   resumeText: '',  // extracted resume text, used to ground personal/background questions
+  updateReady: false,  // true once a downloaded update is waiting to install
+  updateVersion: '',
 });
 
 module.exports = { createStore, store };
