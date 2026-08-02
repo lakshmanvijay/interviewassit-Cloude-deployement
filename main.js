@@ -1,8 +1,32 @@
 const { app, BrowserWindow, globalShortcut, ipcMain, screen, Tray, Menu, nativeImage, session, desktopCapturer, shell } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
+
+// ── AUTO-UPDATE (Chrome/Discord-style — silent background download, no
+// native dialog; only a renderer-side banner once an update is ready) ──
+// electron-updater no-ops/errors on an unpackaged `electron .` dev run, so
+// this only ever runs inside app.whenReady() guarded by app.isPackaged.
+const AUTO_UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
+
+function setupAutoUpdater() {
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  autoUpdater.on('update-downloaded', info => {
+    if (overlayWindow) overlayWindow.webContents.send('update-ready', { version: info.version });
+  });
+  autoUpdater.on('error', err => {
+    // Background check failures are never surfaced to the user — same as
+    // how a browser silently retries later instead of showing an error.
+    console.error('[update] error:', err.message);
+  });
+
+  autoUpdater.checkForUpdates();
+  setInterval(() => autoUpdater.checkForUpdates(), AUTO_UPDATE_CHECK_INTERVAL_MS);
+}
 
 // ── DEEP-LINK PROTOCOL REGISTRATION ───────────────
 // Must happen before app.whenReady() — this is what lets the OS hand
@@ -71,6 +95,49 @@ let isOverlayVisible = true;
 const WEB_LOGIN_URL = process.env.INTERVIEWASSIST_WEB_LOGIN_URL || 'https://vijayamai.com/login';
 const LOGIN_API_URL = process.env.INTERVIEWASSIST_LOGIN_API_URL || 'https://interview-backend-production-c8b5.up.railway.app/api/auth/login';
 let sessionToken = null;
+
+// ── REMOTE CONFIG ──────────────────────────────────
+// Lets us repoint the login URLs for every installed user by editing a JSON
+// file on the frontend, instead of shipping a new build. Explicit env vars
+// (local dev override) always win over this. Fails silently to the
+// hardcoded defaults above — a broken/unreachable config file must never
+// block login.
+const REMOTE_CONFIG_URL = 'https://interviewassist-web.vercel.app/app-config.json';
+
+function fetchJson(url, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const lib = parsed.protocol === 'https:' ? https : http;
+    const req = lib.get(parsed, res => {
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        res.resume();
+        return reject(new Error(`Config fetch returned ${res.statusCode}`));
+      }
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('Config fetch timed out')));
+  });
+}
+
+function loadRemoteConfig() {
+  fetchJson(REMOTE_CONFIG_URL, 5000)
+    .then(cfg => {
+      if (cfg.webLoginUrl && !process.env.INTERVIEWASSIST_WEB_LOGIN_URL) WEB_LOGIN_URL = cfg.webLoginUrl;
+      if (cfg.loginApiUrl && !process.env.INTERVIEWASSIST_LOGIN_API_URL) LOGIN_API_URL = cfg.loginApiUrl;
+      console.log('[config] remote config applied:', { WEB_LOGIN_URL, LOGIN_API_URL });
+    })
+    .catch(e => console.error('[config] remote config fetch failed, using built-in defaults:', e.message));
+}
+loadRemoteConfig();
 
 // Resume text extracted from account.resume (a PDF URL), used to ground
 // answers about the candidate's background/previous projects. Truncated to
@@ -300,6 +367,7 @@ app.whenReady().then(() => {
 
   createOverlayWindow();
   createTray();
+  if (app.isPackaged) setupAutoUpdater();
 
   // Cold launch via the deep link on Windows/Linux (not already running,
   // so there's no 'second-instance' event) — the URL arrives as an argv.
@@ -475,6 +543,8 @@ ipcMain.on('logout', () => {
   resumeText = '';
   if (overlayWindow) overlayWindow.webContents.send('logged-out');
 });
+
+ipcMain.on('restart-and-install', () => autoUpdater.quitAndInstall());
 
 // Returns screen sources so the renderer can use chromeMediaSource:'desktop'
 // to capture system audio (WASAPI loopback) without touching the microphone.

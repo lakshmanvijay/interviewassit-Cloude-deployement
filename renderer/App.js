@@ -13,6 +13,7 @@ const { scrollElIntoTop } = require('./lib/scroll');
 const { TitleBar } = require('./components/TitleBar');
 const { SettingsPanel } = require('./components/SettingsPanel');
 const { StatusWarning } = require('./components/StatusWarning');
+const { UpdateBanner } = require('./components/UpdateBanner');
 const { VoiceBar } = require('./components/VoiceBar');
 const { Conversation } = require('./components/Conversation');
 const { InputArea } = require('./components/InputArea');
@@ -243,6 +244,7 @@ function App({ store }) {
       'account-received':       (_, account) => store.setState({ account }),
       'resume-parsed':          (_, text) => store.setState({ resumeText: text }),
       'logged-out':             () => store.setState({ account: null, resumeText: '' }),
+      'update-ready':           (_, { version }) => store.setState({ updateReady: true, updateVersion: version }),
     };
     Object.entries(listeners).forEach(([ch, fn]) => ipcRenderer.on(ch, fn));
 
@@ -275,6 +277,7 @@ function App({ store }) {
       />
       <${SettingsPanel} store=${store} onSaveCerebrasKey=${saveCerebrasKey} onSaveGroqKey=${saveGroqKey} onClose=${closeSettings} />
       <${StatusWarning} store=${store} />
+      <${UpdateBanner} store=${store} onRestart=${() => ipcRenderer.send('restart-and-install')} />
       <${VoiceBar} store=${store} voiceController=${voiceControllerRef.current} />
       <${Conversation} store=${store} containerRef=${conversationRef} />
       <${InputArea} store=${store} inputRef=${inputRef} onSend=${sendMessage} />
