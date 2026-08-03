@@ -13,7 +13,7 @@ function TitleBar({ store, onToggleListen, onCaptureScreenshot, onClear, onCopy,
     <div id="titlebar">
       <div class="title-left">
         <div class="logo-dot"></div>
-        <span class="app-name">InterviewAssist</span>
+        <span class="app-name">VijayamAI</span>
         <span class="stealth-badge">🔒 HIDDEN</span>
       </div>
       <div class="title-actions">

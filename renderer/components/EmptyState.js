@@ -36,7 +36,7 @@ function EmptyState({ store }) {
           `}
           <button class="login-btn logout-btn" onClick=${() => ipcRenderer.send('logout')}>Logout</button>
         ` : html`
-          <div class="login-title">InterviewAssist</div>
+          <div class="login-title">VijayamAI</div>
           <div class="login-sub">Sign in to continue</div>
           <button class="login-btn" onClick=${() => ipcRenderer.send('start-login')}>Login</button>
         `}

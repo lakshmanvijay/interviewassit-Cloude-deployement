@@ -92,8 +92,8 @@ let isOverlayVisible = true;
 // redirects to interviewassist://callback?token=..., the OS hands that URL
 // to this app (see the deep-link registration above), and the token is used
 // to fetch the account from the backend.
-const WEB_LOGIN_URL = process.env.INTERVIEWASSIST_WEB_LOGIN_URL || 'https://vijayamai.com/login';
-const LOGIN_API_URL = process.env.INTERVIEWASSIST_LOGIN_API_URL || 'https://interview-backend-production-c8b5.up.railway.app/api/auth/login';
+let WEB_LOGIN_URL = process.env.INTERVIEWASSIST_WEB_LOGIN_URL || 'https://vijayamai.com/login';
+let LOGIN_API_URL = process.env.INTERVIEWASSIST_LOGIN_API_URL || 'https://interview-backend-production-c8b5.up.railway.app/api/auth/login';
 let sessionToken = null;
 
 // ── REMOTE CONFIG ──────────────────────────────────
