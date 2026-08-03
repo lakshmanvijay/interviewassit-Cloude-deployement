@@ -102,7 +102,7 @@ let sessionToken = null;
 // (local dev override) always win over this. Fails silently to the
 // hardcoded defaults above — a broken/unreachable config file must never
 // block login.
-const REMOTE_CONFIG_URL = 'https://interviewassist-web.vercel.app/app-config.json';
+const REMOTE_CONFIG_URL = 'https://vijayamai.com/app-config.json';
 
 function fetchJson(url, timeoutMs) {
   return new Promise((resolve, reject) => {
