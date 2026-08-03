@@ -1,15 +1,81 @@
-const { app, BrowserWindow, globalShortcut, ipcMain, screen, Tray, Menu, nativeImage, session, desktopCapturer } = require('electron');
+const { app, BrowserWindow, globalShortcut, ipcMain, screen, Tray, Menu, nativeImage, session, desktopCapturer, shell } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const path = require('path');
+const fs = require('fs');
+const http = require('http');
 const https = require('https');
-const Cerebras = require('@cerebras/cerebras_cloud_sdk');
+
+// ── AUTO-UPDATE (Chrome/Discord-style — silent background download, no
+// native dialog; only a renderer-side banner once an update is ready) ──
+// electron-updater no-ops/errors on an unpackaged `electron .` dev run, so
+// this only ever runs inside app.whenReady() guarded by app.isPackaged.
+const AUTO_UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
+
+function setupAutoUpdater() {
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  autoUpdater.on('update-downloaded', info => {
+    if (overlayWindow) overlayWindow.webContents.send('update-ready', { version: info.version });
+  });
+  autoUpdater.on('error', err => {
+    // Background check failures are never surfaced to the user — same as
+    // how a browser silently retries later instead of showing an error.
+    console.error('[update] error:', err.message);
+  });
+
+  autoUpdater.checkForUpdates();
+  setInterval(() => autoUpdater.checkForUpdates(), AUTO_UPDATE_CHECK_INTERVAL_MS);
+}
+
+// ── DEEP-LINK PROTOCOL REGISTRATION ───────────────
+// Must happen before app.whenReady() — this is what lets the OS hand
+// myapp://callback?token=... URLs back to this app after the system
+// browser finishes the web login.
+const PROTOCOL = 'interviewassist';
+if (process.defaultApp) {
+  // Running unpackaged (e.g. `electron .`) — needs the exact exec path + script arg.
+  if (process.argv.length >= 2) {
+    app.setAsDefaultProtocolClient(PROTOCOL, process.execPath, [path.resolve(process.argv[1])]);
+  }
+} else {
+  app.setAsDefaultProtocolClient(PROTOCOL);
+}
+
+// Windows/Linux deliver the deep link as an argv on a new launch — since the
+// OS would otherwise just spawn a second copy of the app, claim a single
+// instance lock and forward the URL to the already-running instance instead.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (event, commandLine) => {
+    if (overlayWindow) {
+      if (overlayWindow.isMinimized()) overlayWindow.restore();
+      overlayWindow.focus();
+    }
+    const url = commandLine.find(arg => arg.startsWith(`${PROTOCOL}://`));
+    if (url) handleAuthCallback(url);
+  });
+}
+
+// macOS delivers deep links via this event instead of argv.
+app.on('open-url', (event, url) => {
+  event.preventDefault();
+  handleAuthCallback(url);
+});
 
 // ── API KEYS ──────────────────────────────────────
-// ── API KEYS push for git remove the keys ──────────────────────────────────────
-const CEREBRAS_API_KEY = process.env.CEREBRAS_API_KEY || '';
-const GROQ_API_KEY     = process.env.GROQ_API_KEY || '';
+// User-supplied via the renderer's settings dropdown (see 'set-api-keys'
+// below) take priority; env vars are just a fallback for local dev.
+let CEREBRAS_API_KEY = process.env.CEREBRAS_API_KEY || '';
+let GROQ_API_KEY     = process.env.GROQ_API_KEY || '';
 let cerebrasClient = null;
 function getCerebrasClient() {
   if (!cerebrasClient) {
+    // Deferred until the first chat request — this SDK alone takes ~300ms to
+    // require(), which used to run unconditionally before the window even opened.
+    const Cerebras = require('@cerebras/cerebras_cloud_sdk');
     cerebrasClient = new Cerebras({ apiKey: CEREBRAS_API_KEY });
   }
   return cerebrasClient;
@@ -18,6 +84,104 @@ function getCerebrasClient() {
 let overlayWindow = null;
 let tray = null;
 let isOverlayVisible = true;
+
+// ── LOGIN (system-browser + deep-link hand-off) ───
+// "Login" opens the real web login page in the user's system browser
+// (never inside an Electron window) with a redirect param pointing back at
+// our custom protocol. After the user authenticates there, the browser
+// redirects to interviewassist://callback?token=..., the OS hands that URL
+// to this app (see the deep-link registration above), and the token is used
+// to fetch the account from the backend.
+let WEB_LOGIN_URL = process.env.INTERVIEWASSIST_WEB_LOGIN_URL || 'https://vijayamai.com/login';
+let LOGIN_API_URL = process.env.INTERVIEWASSIST_LOGIN_API_URL || 'https://interview-backend-production-c8b5.up.railway.app/api/auth/login';
+let sessionToken = null;
+
+// ── REMOTE CONFIG ──────────────────────────────────
+// Lets us repoint the login URLs for every installed user by editing a JSON
+// file on the frontend, instead of shipping a new build. Explicit env vars
+// (local dev override) always win over this. Fails silently to the
+// hardcoded defaults above — a broken/unreachable config file must never
+// block login.
+const REMOTE_CONFIG_URL = 'https://vijayamai.com/app-config.json';
+
+function fetchJson(url, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const lib = parsed.protocol === 'https:' ? https : http;
+    const req = lib.get(parsed, res => {
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        res.resume();
+        return reject(new Error(`Config fetch returned ${res.statusCode}`));
+      }
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('Config fetch timed out')));
+  });
+}
+
+function loadRemoteConfig() {
+  fetchJson(REMOTE_CONFIG_URL, 5000)
+    .then(cfg => {
+      if (cfg.webLoginUrl && !process.env.INTERVIEWASSIST_WEB_LOGIN_URL) WEB_LOGIN_URL = cfg.webLoginUrl;
+      if (cfg.loginApiUrl && !process.env.INTERVIEWASSIST_LOGIN_API_URL) LOGIN_API_URL = cfg.loginApiUrl;
+      console.log('[config] remote config applied:', { WEB_LOGIN_URL, LOGIN_API_URL });
+    })
+    .catch(e => console.error('[config] remote config fetch failed, using built-in defaults:', e.message));
+}
+loadRemoteConfig();
+
+// Resume text extracted from account.resume (a PDF URL), used to ground
+// answers about the candidate's background/previous projects. Truncated to
+// keep prompt size sane; parsing failures (non-PDF, unreachable) just leave
+// this empty rather than breaking login.
+const RESUME_TEXT_MAX_CHARS = 6000;
+let resumeText = '';
+
+// Plain http/https GET into a Buffer — same raw-request style already used
+// elsewhere in this file (Groq calls, the login API).
+function fetchBuffer(url) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const lib = parsed.protocol === 'https:' ? https : http;
+    lib.get(parsed, res => {
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        return reject(new Error(`Resume fetch returned ${res.statusCode}`));
+      }
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+    }).on('error', reject);
+  });
+}
+
+async function parseResume(url) {
+  try {
+    console.log(`[resume] fetching + parsing: ${url}`);
+    // Deferred require — same "only pay the cost when actually needed"
+    // convention used for the Cerebras SDK above. pdf-parse@1.x is a plain
+    // text extractor with no DOM/canvas dependency, unlike 2.x (which wraps
+    // pdf.js and needs browser globals like DOMMatrix that don't exist in
+    // Electron's bundled Node runtime).
+    const pdfParse = require('pdf-parse');
+    const buffer = await fetchBuffer(url);
+    const result = await pdfParse(buffer);
+    const text = (result.text || '').slice(0, RESUME_TEXT_MAX_CHARS);
+    console.log(`[resume] extracted ${text.length} chars:\n${text}`);
+    return text;
+  } catch (e) {
+    console.error('[resume] parse failed:', e.message);
+    return '';
+  }
+}
 
 // ─────────────────────────────────────────────
 // CREATE THE HIDDEN OVERLAY WINDOW
@@ -48,6 +212,11 @@ function createOverlayWindow() {
 
   overlayWindow.loadFile('overlay.html');
   if (process.env.OPEN_DEVTOOLS) overlayWindow.webContents.openDevTools({ mode: 'detach' });
+  if (process.env.DEBUG_CONSOLE) {
+    overlayWindow.webContents.on('console-message', (e, level, message, line, sourceId) => {
+      console.log(`[renderer] ${message} (${sourceId}:${line})`);
+    });
+  }
 
   // WDA_EXCLUDEFROMCAPTURE = 0x00000011 — invisible in screen share / recording
   overlayWindow.setContentProtection(true);
@@ -64,6 +233,88 @@ function createOverlayWindow() {
   overlayWindow.on('minimize', () => {
     overlayWindow.restore();
     overlayWindow.webContents.send('toggle-collapse');
+  });
+}
+
+// Called with the raw interviewassist://callback?token=... URL, whether it
+// arrived via 'open-url' (macOS), 'second-instance' (Windows/Linux, already
+// running), or process.argv on a cold launch. Extracts the token and uses it
+// to fetch the account from the backend.
+function handleAuthCallback(rawUrl) {
+  let token;
+  try {
+    token = new URL(rawUrl).searchParams.get('token');
+  } catch (e) {
+    console.error('[login] malformed callback URL:', rawUrl);
+    return;
+  }
+  if (!token) return;
+
+  sessionToken = token;
+  fetchAccountFromApi(token)
+    .then(account => {
+      if (!account) return;
+      if (overlayWindow) overlayWindow.webContents.send('account-received', account);
+
+      if (account.resume) {
+        parseResume(account.resume).then(text => {
+          resumeText = text;
+          if (text && overlayWindow) overlayWindow.webContents.send('resume-parsed', text);
+        });
+      }
+    })
+    .catch(e => console.error('[login] failed to fetch account from API:', e.message));
+}
+
+// Response shape isn't fully known — handled defensively as either
+// { user: {...} } or the user object directly.
+function fetchAccountFromApi(token) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(LOGIN_API_URL);
+    const lib = url.protocol === 'https:' ? https : http;
+    const body = JSON.stringify({ token });
+    console.log(`[login] POST ${url.toString()} (token: ${token.slice(0, 12)}…)`);
+    const req = lib.request({
+      hostname: url.hostname,
+      port: url.port || (url.protocol === 'https:' ? 443 : 80),
+      path: url.pathname + url.search,
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body)
+      }
+    }, res => {
+      let data = '';
+      res.on('data', c => (data += c));
+      res.on('end', () => {
+        console.log(`[login] backend response (${res.statusCode}):`, data);
+        try {
+          fs.writeFileSync(
+            path.join(app.getPath('userData'), 'login-response.json'),
+            data
+          );
+        } catch (e) {
+          console.error('[login] failed to write login-response.json:', e.message);
+        }
+
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          return reject(new Error(`Login API returned ${res.statusCode}: ${data.slice(0, 500)}`));
+        }
+        try {
+          const parsed = JSON.parse(data);
+          const user = parsed.user || parsed;
+          const { password, ...account } = user;
+          console.log('[login] resolved account:', account);
+          resolve(account);
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+    req.write(body);
+    req.on('error', reject);
+    req.end();
   });
 }
 
@@ -104,11 +355,6 @@ function toggleOverlay() {
   isOverlayVisible = !isOverlayVisible;
 }
 
-
-// Suppress GPU disk cache errors (benign Chromium warnings)
-app.commandLine.appendSwitch('disable-gpu-cache');
-app.commandLine.appendSwitch('disable-software-rasterizer');
-
 // APP LIFECYCLE
 // ─────────────────────────────────────────────
 app.whenReady().then(() => {
@@ -121,6 +367,12 @@ app.whenReady().then(() => {
 
   createOverlayWindow();
   createTray();
+  if (app.isPackaged) setupAutoUpdater();
+
+  // Cold launch via the deep link on Windows/Linux (not already running,
+  // so there's no 'second-instance' event) — the URL arrives as an argv.
+  const launchUrl = process.argv.find(arg => arg.startsWith(`${PROTOCOL}://`));
+  if (launchUrl) handleAuthCallback(launchUrl);
 
   // Ctrl+M — intercept native minimize, redirect to custom collapse
   globalShortcut.register('CommandOrControl+M', () => {
@@ -256,11 +508,43 @@ ipcMain.on('set-opacity', (event, opacity) => {
   if (overlayWindow) overlayWindow.setOpacity(opacity);
 });
 
+// Renderer's settings dropdown pastes in the user's own keys — used for
+// AI answers (Cerebras) and voice-to-text + screenshot analysis (Groq).
+ipcMain.on('set-api-keys', (event, { cerebrasApiKey, groqApiKey } = {}) => {
+  if (typeof cerebrasApiKey === 'string' && cerebrasApiKey !== CEREBRAS_API_KEY) {
+    CEREBRAS_API_KEY = cerebrasApiKey;
+    cerebrasClient = null; // force getCerebrasClient() to rebuild with the new key
+  }
+  if (typeof groqApiKey === 'string') {
+    GROQ_API_KEY = groqApiKey;
+  }
+});
+
 
 ipcMain.handle('get-window-position', () => {
   if (overlayWindow) return overlayWindow.getPosition();
   return [0, 0];
 });
+
+// Opens the real web login page in the user's system browser (never inside
+// an Electron window) with a redirect param pointing back at our custom
+// protocol — see the deep-link registration + handleAuthCallback() above.
+ipcMain.on('start-login', () => {
+  const url = new URL(WEB_LOGIN_URL);
+  url.searchParams.set('redirect', `${PROTOCOL}://callback`);
+  shell.openExternal(url.toString());
+});
+
+// No local session/cookie store to clear here anymore — login now happens
+// in the user's own system browser, not an Electron-hosted window. Logging
+// out of the web app itself (if desired) has to happen in that browser.
+ipcMain.on('logout', () => {
+  sessionToken = null;
+  resumeText = '';
+  if (overlayWindow) overlayWindow.webContents.send('logged-out');
+});
+
+ipcMain.on('restart-and-install', () => autoUpdater.quitAndInstall());
 
 // Returns screen sources so the renderer can use chromeMediaSource:'desktop'
 // to capture system audio (WASAPI loopback) without touching the microphone.
@@ -286,6 +570,7 @@ ipcMain.on('cerebras-chat', async (event, { id, model, messages }) => {
       model: model || 'llama3.1-8b',
       messages,
       stream: true,
+      stream_options: { include_usage: true },
       max_completion_tokens: 900,
       temperature: 0.1,
       top_p: 1,
@@ -295,6 +580,15 @@ ipcMain.on('cerebras-chat', async (event, { id, model, messages }) => {
       clearTimeout(timeout);
       const delta = chunk.choices?.[0]?.delta?.content;
       if (delta && !wc.isDestroyed()) wc.send('cerebras-chunk', { id, delta });
+      // The system prompt (base instructions + resume text) is a stable,
+      // byte-identical prefix across turns in the same session, so Cerebras'
+      // own KV-cache reuse (same mechanism as OpenAI's automatic prompt
+      // caching — no special request shape needed) kicks in on its own.
+      // This just makes that reuse visible instead of invisible.
+      if (chunk.usage) {
+        const cached = chunk.usage.prompt_tokens_details?.cached_tokens || 0;
+        console.log(`[cerebras] prompt_tokens=${chunk.usage.prompt_tokens} cached_tokens=${cached}`);
+      }
     }
     if (!wc.isDestroyed()) wc.send('cerebras-done', { id });
   } catch (err) {

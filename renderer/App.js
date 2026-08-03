@@ -1,0 +1,288 @@
+const { ipcRenderer } = require('electron');
+const { html } = require('./html');
+const { useRef, useEffect } = require('preact/hooks');
+
+const { getSystemPrompt } = require('./lib/prompts');
+const { cerebrasChat } = require('./lib/cerebras');
+const { screenAnalyze } = require('./lib/screenAnalyze');
+const { createVoiceController } = require('./lib/voice');
+const { createWarningController } = require('./lib/warning');
+const { createQuestionNav } = require('./lib/navigation');
+const { scrollElIntoTop } = require('./lib/scroll');
+
+const { TitleBar } = require('./components/TitleBar');
+const { SettingsPanel } = require('./components/SettingsPanel');
+const { StatusWarning } = require('./components/StatusWarning');
+const { UpdateBanner } = require('./components/UpdateBanner');
+const { VoiceBar } = require('./components/VoiceBar');
+const { Conversation } = require('./components/Conversation');
+const { InputArea } = require('./components/InputArea');
+
+const FULL_HEIGHT = 640;
+const COLLAPSED_HEIGHT = 44;
+
+let _idCounter = 0;
+function genId() { return 'm' + (++_idCounter) + '_' + Date.now().toString(36); }
+
+function App({ store }) {
+  const conversationRef = useRef(null);
+  const inputRef = useRef(null);
+
+  const warningRef = useRef(null);
+  if (!warningRef.current) warningRef.current = createWarningController(store);
+
+  const questionNavRef = useRef(null);
+  if (!questionNavRef.current) {
+    questionNavRef.current = createQuestionNav(store, () => conversationRef.current);
+  }
+
+  function updateMessage(id, patch) {
+    store.setState(s => ({
+      conversation: s.conversation.map(m => (m.id === id ? { ...m, ...patch } : m))
+    }));
+  }
+
+  // Looked up lazily (inside scrollElIntoTop's delayed callback) since the
+  // message usually doesn't exist in the DOM yet at the moment this is called.
+  function scrollQuestionIntoTop(userId) {
+    scrollElIntoTop(() => conversationRef.current && conversationRef.current.querySelector(`[data-msg-id="${userId}"]`));
+  }
+
+  async function ask(text) {
+    text = (text || '').trim();
+    if (!text) return;
+
+    const userId = genId();
+    store.setState(s => ({ conversation: [...s.conversation, { id: userId, role: 'user', content: text }] }));
+    scrollQuestionIntoTop(userId);
+
+    // History is captured *before* the assistant placeholder is appended,
+    // so it never includes the in-flight streaming answer.
+    const history = store.getState().conversation.slice(-2).map(m => ({ role: m.role, content: m.content }));
+    const { mode, model, resumeText } = store.getState();
+    const messages = [{ role: 'system', content: getSystemPrompt(mode, resumeText) }, ...history];
+
+    const assistantId = genId();
+    store.setState(s => ({ conversation: [...s.conversation, { id: assistantId, role: 'assistant', content: '', streaming: true }] }));
+
+    let lastRenderAt = 0;
+    try {
+      const reply = await cerebrasChat(messages, model, partial => {
+        const now = performance.now();
+        if (now - lastRenderAt < 30) return;
+        lastRenderAt = now;
+        updateMessage(assistantId, { content: partial });
+      });
+      updateMessage(assistantId, { content: reply, streaming: false });
+      warningRef.current.showWarning('');
+    } catch (err) {
+      updateMessage(assistantId, { content: 'Error: ' + err.message, streaming: false });
+      warningRef.current.showWarning(err.message);
+    } finally {
+      scrollQuestionIntoTop(userId);
+    }
+  }
+
+  const voiceControllerRef = useRef(null);
+  if (!voiceControllerRef.current) {
+    voiceControllerRef.current = createVoiceController({
+      store,
+      showOnScreen: warningRef.current.showOnScreen,
+      onTranscript: async text => {
+        if (store.getState().autoAsk) {
+          await ask(text);
+          return;
+        }
+        const el = inputRef.current;
+        el.value = (el.value ? el.value + ' ' : '') + text;
+        el.style.height = 'auto';
+        el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+      }
+    });
+  }
+
+  async function askWithScreenshots(images, text) {
+    const userLabel = images.length > 1
+      ? `📸 ×${images.length}${text ? ' — ' + text : ''}`
+      : `📸${text ? ' — ' + text : ''}`;
+
+    const userId = genId();
+    store.setState(s => ({ conversation: [...s.conversation, { id: userId, role: 'user', content: userLabel }] }));
+    scrollQuestionIntoTop(userId);
+
+    const assistantId = genId();
+    store.setState(s => ({ conversation: [...s.conversation, { id: assistantId, role: 'assistant', content: '', streaming: true }] }));
+
+    store.setState({ sendDisabled: true });
+    let lastRenderAt = 0;
+    try {
+      const reply = await screenAnalyze(images, text, partial => {
+        const now = performance.now();
+        if (now - lastRenderAt < 30) return;
+        lastRenderAt = now;
+        updateMessage(assistantId, { content: partial });
+      });
+      updateMessage(assistantId, { content: reply, streaming: false });
+    } catch (err) {
+      updateMessage(assistantId, { content: 'Error: ' + err.message, streaming: false });
+    } finally {
+      store.setState({ sendDisabled: false });
+      scrollQuestionIntoTop(userId);
+    }
+  }
+
+  function sendMessage() {
+    const input = inputRef.current;
+    const text = input.value.trim();
+    const shots = store.getState().pendingScreenshots;
+
+    if (shots.length > 0) {
+      const images = [...shots];
+      store.setState({ pendingScreenshots: [] });
+      input.value = ''; input.style.height = 'auto';
+      askWithScreenshots(images, text);
+      return;
+    }
+
+    if (!text) return;
+    store.setState({ sendDisabled: true });
+    input.value = ''; input.style.height = 'auto';
+    ask(text).finally(() => store.setState({ sendDisabled: false }));
+  }
+
+  function clearConversation() {
+    store.setState({ conversation: [], navIndex: -1 });
+  }
+
+  function copyLastAnswer() {
+    const last = [...store.getState().conversation].reverse().find(m => m.role === 'assistant');
+    if (last) navigator.clipboard.writeText(last.content);
+  }
+
+  function setOpacity(val) {
+    store.setState({ opacity: val });
+    ipcRenderer.send('set-opacity', Number(val) / 100);
+  }
+
+  async function captureScreenshot() {
+    store.setState({ capturingScreenshot: true });
+    const result = await ipcRenderer.invoke('capture-screenshot');
+    store.setState({ capturingScreenshot: false });
+
+    if (result.error) { warningRef.current.showOnScreen('Screenshot failed: ' + result.error); return; }
+
+    store.setState(s => ({ pendingScreenshots: [...s.pendingScreenshots, result.base64] }));
+    const n = store.getState().pendingScreenshots.length;
+    warningRef.current.showOnScreen(`📸 ${n} screenshot${n > 1 ? 's' : ''} attached — type a question or just hit Send`);
+
+    // The screenshot button just took focus away from the textarea —
+    // return it so typing and the Ctrl+Enter send shortcut work right away.
+    if (inputRef.current) inputRef.current.focus();
+  }
+
+  function minimizeWindow() {
+    const collapsed = !store.getState().collapsed;
+    store.setState({ collapsed });
+    ipcRenderer.send('resize-overlay', {
+      width: 480,
+      height: collapsed ? COLLAPSED_HEIGHT : FULL_HEIGHT
+    });
+  }
+
+  function toggleSettings() {
+    store.setState(s => ({ settingsOpen: !s.settingsOpen }));
+  }
+
+  function closeSettings() {
+    store.setState({ settingsOpen: false });
+  }
+
+  function sendApiKeysToMain() {
+    const { cerebrasApiKey, groqApiKey } = store.getState();
+    ipcRenderer.send('set-api-keys', { cerebrasApiKey, groqApiKey });
+  }
+
+  function saveCerebrasKey(value) {
+    store.setState({ cerebrasApiKey: value });
+    localStorage.setItem('cerebras_api_key', value);
+    sendApiKeysToMain();
+  }
+
+  function saveGroqKey(value) {
+    store.setState({ groqApiKey: value });
+    localStorage.setItem('groq_api_key', value);
+    sendApiKeysToMain();
+  }
+
+  useEffect(() => {
+    // Push whatever was already saved (from localStorage, via index.js)
+    // to the main process once at startup — it starts out with no keys.
+    sendApiKeysToMain();
+
+    const cleanupScroll = questionNavRef.current.attachScrollListener();
+
+    const onDocMouseDown = e => {
+      if (!store.getState().settingsOpen) return;
+      const panel = document.getElementById('settings-panel');
+      const gearBtn = document.getElementById('settings-gear-btn');
+      if ((panel && panel.contains(e.target)) || (gearBtn && gearBtn.contains(e.target))) return;
+      store.setState({ settingsOpen: false });
+    };
+    document.addEventListener('mousedown', onDocMouseDown);
+
+    const listeners = {
+      'focus-input':            () => inputRef.current && inputRef.current.focus(),
+      'clear-conversation':     () => clearConversation(),
+      'toggle-listen':          () => voiceControllerRef.current.toggleListen(),
+      'trigger-screen-analyze': () => captureScreenshot(),
+      'copy-answer':            () => copyLastAnswer(),
+      'toggle-collapse':        () => minimizeWindow(),
+      'nav-prev-question':      () => questionNavRef.current.navigateQuestion(-1),
+      'nav-next-question':      () => questionNavRef.current.navigateQuestion(+1),
+      'jump-to-first-question': () => questionNavRef.current.jumpToQuestion(0),
+      'jump-to-last-question':  () => questionNavRef.current.jumpToQuestion(Infinity),
+      'account-received':       (_, account) => store.setState({ account }),
+      'resume-parsed':          (_, text) => store.setState({ resumeText: text }),
+      'logged-out':             () => store.setState({ account: null, resumeText: '' }),
+      'update-ready':           (_, { version }) => store.setState({ updateReady: true, updateVersion: version }),
+    };
+    Object.entries(listeners).forEach(([ch, fn]) => ipcRenderer.on(ch, fn));
+
+    const onOpacityStep = (_, step) => {
+      const next = Math.min(100, Math.max(20, store.getState().opacity + step));
+      setOpacity(next);
+    };
+    ipcRenderer.on('opacity-step', onOpacityStep);
+
+    return () => {
+      cleanupScroll();
+      Object.entries(listeners).forEach(([ch, fn]) => ipcRenderer.removeListener(ch, fn));
+      ipcRenderer.removeListener('opacity-step', onOpacityStep);
+      document.removeEventListener('mousedown', onDocMouseDown);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return html`
+    <div id="app">
+      <${TitleBar}
+        store=${store}
+        onToggleListen=${() => voiceControllerRef.current.toggleListen()}
+        onCaptureScreenshot=${captureScreenshot}
+        onClear=${clearConversation}
+        onCopy=${copyLastAnswer}
+        onMinimize=${minimizeWindow}
+        onOpacityChange=${setOpacity}
+        onToggleSettings=${toggleSettings}
+      />
+      <${SettingsPanel} store=${store} onSaveCerebrasKey=${saveCerebrasKey} onSaveGroqKey=${saveGroqKey} onClose=${closeSettings} />
+      <${StatusWarning} store=${store} />
+      <${UpdateBanner} store=${store} onRestart=${() => ipcRenderer.send('restart-and-install')} />
+      <${VoiceBar} store=${store} voiceController=${voiceControllerRef.current} />
+      <${Conversation} store=${store} containerRef=${conversationRef} />
+      <${InputArea} store=${store} inputRef=${inputRef} onSend=${sendMessage} />
+    </div>
+  `;
+}
+
+module.exports = { App };

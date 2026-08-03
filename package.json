@@ -5,12 +5,17 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder --win"
+    "build": "electron-builder --win",
+    "dist": "electron-builder",
+    "release": "electron-builder --publish always"
   },
   "dependencies": {
     "@cerebras/cerebras_cloud_sdk": "^1.64.1",
+    "electron-updater": "^6.8.9",
     "ffmpeg-static": "^5.3.0",
-    "pdf-parse": "^2.4.5"
+    "htm": "^3.1.1",
+    "pdf-parse": "1.1.4",
+    "preact": "^10.29.7"
   },
   "optionalDependencies": {
     "vosk": "^0.3.39"
@@ -22,6 +27,12 @@
   "build": {
     "appId": "com.stealth.interview",
     "productName": "InterviewAssist",
+    "protocols": {
+      "name": "InterviewAssist Auth Callback",
+      "schemes": [
+        "interviewassist"
+      ]
+    },
     "win": {
       "target": "nsis",
       "icon": "assets/icon.ico"

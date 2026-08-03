@@ -1,8 +1,8 @@
-cha# InterviewAssist — Local AI Overlay (Ollama + Voice)
+# InterviewAssist — Screen-Hidden AI Interview Overlay
 
-A screen-hidden assistant for Windows. **Visible on your monitor, invisible to screen-sharing tools** (Zoom, Teams, Meet, OBS). It now runs on a **local Ollama model** (no API key, nothing leaves your machine) and can **listen continuously** to spoken questions and answer them hands-free.
+A screen-hidden assistant for Windows. **Visible on your monitor, invisible to screen-sharing tools** (Zoom, Teams, Meet, OBS). It runs on cloud AI (Cerebras for answers, Groq for voice-to-text and screenshot analysis) and can **listen continuously** to spoken questions and answer them hands-free.
 
-> Pipeline: **microphone → speech-to-text → Ollama → answer on screen**
+> Pipeline: **microphone → Groq speech-to-text → Cerebras → answer on screen**
 
 ---
 
@@ -17,47 +17,50 @@ PrintScreen) while keeping it fully visible on your physical monitor.
 
 ## 🚀 Quick start
 
-### 1. Install & run Ollama
-Download from [ollama.com](https://ollama.com), then pull a model:
-```bash
-ollama pull llama3.1          # good general/interview model
-# or a smaller/faster one:
-ollama pull qwen2.5:3b
-# or a coding-focused one:
-ollama pull qwen2.5-coder:7b
-```
-Make sure the server is running (it usually starts automatically):
-```bash
-ollama serve
-```
-By default it listens on `http://localhost:11434`.
-
-### 2. Install app dependencies
+### 1. Install app dependencies
 ```bash
 npm install
 ```
 
-### 3. Run
+### 2. Run
 ```bash
 npm start
 ```
 
-### 4. Build a Windows installer
+### 3. Sign in
+Click **Login** in the overlay — this opens the InterviewAssist web login page
+in your system browser (never inside an Electron window). After you
+authenticate there, the browser redirects back to the app via a custom
+`interviewassist://callback` deep link, which hands your session back to the
+overlay automatically.
+
+### 4. Add your API keys
+Open **Settings** (account avatar in the title bar) and paste in your own:
+- **Cerebras API key** — used for AI answers
+- **Groq API key** — used for voice-to-text and screenshot analysis
+
+Both are stored locally on your device only.
+
+### 5. Build a Windows installer
 ```bash
-npm run build      # output in dist/
+npm run dist        # unpublished build, output in dist/
+npm run release      # build + publish to GitHub Releases (auto-update)
 ```
 
 ---
 
-## 🤖 Using the local model
+## 🌐 Login & backend URLs
 
-- The **Model** dropdown auto-fills with whatever models you've pulled. Hit **↻** to refresh.
-- The **host field** at the bottom defaults to `http://localhost:11434`. Change it if Ollama runs elsewhere (e.g. another PC: `http://192.168.1.50:11434`). The green/red dot shows connection status.
-- No API key. All inference is local.
+The app talks to two of your own services:
+- a **web login page** (`WEB_LOGIN_URL` in `main.js`)
+- a **backend auth API** (`LOGIN_API_URL` in `main.js`) that exchanges the
+  deep-link token for the signed-in account
 
-**Note on connectivity:** the app talks to Ollama from Electron's *main process*
-(plain Node HTTP), which sidesteps the CORS/origin restriction that blocks
-browser `fetch` calls to Ollama. You do **not** need to set `OLLAMA_ORIGINS`.
+Both have hardcoded production defaults but can be overridden two ways:
+1. **Env vars** — `INTERVIEWASSIST_WEB_LOGIN_URL` / `INTERVIEWASSIST_LOGIN_API_URL`, for local dev.
+2. **Remote config** — at startup the app fetches `app-config.json` from the
+   frontend (`{ "webLoginUrl": "...", "loginApiUrl": "..." }`). Editing that
+   file updates the URLs for every installed user without a new app release.
 
 ---
 
@@ -65,91 +68,15 @@ browser `fetch` calls to Ollama. You do **not** need to set `OLLAMA_ORIGINS`.
 
 Click the **🎤** button (or press **Ctrl+Shift+L**) to start listening.
 
-- Live speech appears in the voice bar as it's recognized.
-- When the speaker **pauses (~1.3 s)**, the finished sentence is treated as a complete question.
-- With **auto** checked, that question is sent to Ollama automatically and the answer streams in.
-- Uncheck **auto** to have recognized text dropped into the input box for review before sending.
-
-### Speech engine
-By default this uses the browser **Web Speech API** (`webkitSpeechRecognition`) — zero setup.
-
-⚠️ **Important:** in some Electron builds the Web Speech API relies on a Google
-backend that isn't bundled, so it may report a `network` error and not return
-text. If that happens, switch to the **offline engine** below (it's also fully
-local, matching the Ollama setup).
+- Speech is captured with a voice-activity detector, encoded to WAV, and sent to **Groq** for transcription once you pause.
+- Background noise/filler phrases ("um", "thank you", "okay", …) are filtered out before being treated as a question.
+- The recognized question is sent to **Cerebras** automatically and the answer streams in.
 
 ---
 
-## 🧩 Offline STT with Vosk (recommended fallback)
+## 🖼️ Screenshot analysis
 
-Fully offline, no Google dependency, works reliably inside Electron.
-
-**1. Install Vosk** (already listed as an optional dependency):
-```bash
-npm install vosk
-```
-
-**2. Download a model** from [alphacephei.com/vosk/models](https://alphacephei.com/vosk/models),
-unzip it, and place the folder next to `main.js` as `model/`
-(e.g. `vosk-model-small-en-us-0.15` → rename to `model`).
-
-**3. Replace the Web Speech engine** in `overlay.html` with this renderer-side
-recognizer (it runs locally because the window has `nodeIntegration: true`):
-
-```js
-const vosk = require('vosk');
-const path = require('path');
-vosk.setLogLevel(-1);
-const voskModel = new vosk.Model(path.join(__dirname, 'model'));
-
-let voskRec, audioCtx, srcNode, procNode, micStream;
-
-async function startVosk() {
-  micStream = await navigator.mediaDevices.getUserMedia({
-    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }
-  });
-  audioCtx = new AudioContext();
-  const inRate = audioCtx.sampleRate;                 // typically 48000
-  voskRec   = new vosk.Recognizer({ model: voskModel, sampleRate: 16000 });
-  srcNode   = audioCtx.createMediaStreamSource(micStream);
-  procNode  = audioCtx.createScriptProcessor(4096, 1, 1);
-  srcNode.connect(procNode);
-  procNode.connect(audioCtx.destination);
-
-  procNode.onaudioprocess = (e) => {
-    const f32  = e.inputBuffer.getChannelData(0);     // Float32 @ inRate
-    const i16  = downsample(f32, inRate, 16000);      // Int16Array @ 16k
-    const buf  = Buffer.from(i16.buffer);
-    if (voskRec.acceptWaveform(buf)) {
-      const text = voskRec.result().text;
-      if (text) { ask(text); }                        // → reuse existing ask()
-    } else {
-      updateLiveTranscript(voskRec.partialResult().partial);
-    }
-  };
-}
-
-function stopVosk() {
-  if (procNode) procNode.disconnect();
-  if (srcNode)  srcNode.disconnect();
-  if (micStream) micStream.getTracks().forEach(t => t.stop());
-  if (audioCtx) audioCtx.close();
-}
-
-function downsample(input, inRate, outRate) {
-  const ratio = inRate / outRate;
-  const outLen = Math.floor(input.length / ratio);
-  const out = new Int16Array(outLen);
-  for (let i = 0; i < outLen; i++) {
-    const s = Math.max(-1, Math.min(1, input[Math.floor(i * ratio)]));
-    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-  }
-  return out;
-}
-```
-
-Then call `startVosk()` / `stopVosk()` from `toggleListen()` instead of the
-Web Speech `recognition` object.
+Press **Ctrl+Shift+S** to capture the screen and send it to Groq for analysis — useful for coding questions or slides shared during an interview.
 
 ---
 
@@ -158,31 +85,33 @@ Web Speech `recognition` object.
 | Shortcut | Action |
 |----------|--------|
 | `Ctrl+Shift+H` | Hide / show the overlay |
+| `Ctrl+Shift+M` / `Ctrl+M` | Collapse / expand the overlay |
 | `Ctrl+Shift+L` | Toggle live listening (mic) |
 | `Ctrl+Shift+A` | Quick ask (focus input) |
 | `Ctrl+Shift+C` | Clear conversation |
-| `Ctrl+Enter`   | Send message |
-
----
-
-## 🎯 Modes
-
-- **Interview** — concise, keyword-rich answers for behavioral + technical questions.
-- **Coding** — approach + code + complexity for algorithmic problems.
-- **General** — general-purpose assistant.
-
-Edit the `SYSTEM_PROMPTS` object in `overlay.html` to tune them.
+| `Ctrl+Shift+S` | Analyze screen |
+| `Ctrl+Shift+X` | Copy last answer |
+| `Ctrl+Shift+,` / `.` | Previous / next question |
+| `Ctrl+Shift+1` / `0` | Jump to first / last question |
+| `Ctrl+Shift+[` / `]` | Decrease / increase opacity |
+| `Ctrl+Alt+Arrows` | Move the overlay window |
+| `Ctrl+Enter` | Send message |
 
 ---
 
 ## 📁 Project structure
 
 ```
-stealth-interview-app/
-├── main.js          ← Electron main process: screen hiding, hotkeys, Ollama bridge
-├── overlay.html     ← Hidden AI panel + voice recognition
-├── control.html     ← Mini opacity control panel
-├── preload.js       ← IPC bridge
+interviewassit-Cloude-deployement/
+├── main.js                    ← Electron main process: screen hiding, hotkeys,
+│                                 login/deep-link, auto-update, remote config
+├── overlay.html                ← Hidden AI panel shell (loaded by main.js)
+├── preload.js                  ← IPC bridge
+├── renderer/
+│   ├── App.js                  ← Root component
+│   ├── store.js                ← App state
+│   ├── components/              ← TitleBar, SettingsPanel, VoiceBar, Conversation, …
+│   └── lib/                     ← cerebras.js, voice.js, screenAnalyze.js, prompts.js, …
 ├── package.json
 └── README.md
 ```
@@ -193,5 +122,5 @@ stealth-interview-app/
 
 - Windows 10/11 (build 2004+) required for `WDA_EXCLUDEFROMCAPTURE`.
 - Microphone permission is auto-granted by the app so listening works without a prompt.
-- Local models are slower than cloud APIs; pick a smaller model (e.g. `qwen2.5:3b`) for snappier answers, a larger one for quality.
+- Requires your own Cerebras and Groq API keys (added via Settings) — no keys are bundled with the app.
 - Use responsibly and ethically. Good-faith uses include mock-interview practice, live captioning/accessibility, and real-time study assistance.
