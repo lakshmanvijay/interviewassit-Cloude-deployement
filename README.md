@@ -1,4 +1,4 @@
-# InterviewAssist — Screen-Hidden AI Interview Overlay
+# vijayamAI — Screen-Hidden AI Interview Overlay
 
 A screen-hidden assistant for Windows. **Visible on your monitor, invisible to screen-sharing tools** (Zoom, Teams, Meet, OBS). It runs on cloud AI (Cerebras for answers, Groq for voice-to-text and screenshot analysis) and can **listen continuously** to spoken questions and answer them hands-free.
 
@@ -28,7 +28,7 @@ npm start
 ```
 
 ### 3. Sign in
-Click **Login** in the overlay — this opens the InterviewAssist web login page
+Click **Login** in the overlay — this opens the vijayamAI web login page
 in your system browser (never inside an Electron window). After you
 authenticate there, the browser redirects back to the app via a custom
 `interviewassist://callback` deep link, which hands your session back to the

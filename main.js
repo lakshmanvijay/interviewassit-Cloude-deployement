@@ -32,7 +32,7 @@ function setupAutoUpdater() {
 // Must happen before app.whenReady() — this is what lets the OS hand
 // myapp://callback?token=... URLs back to this app after the system
 // browser finishes the web login.
-const PROTOCOL = 'interviewassist';
+const PROTOCOL = 'VijayamAI';
 if (process.defaultApp) {
   // Running unpackaged (e.g. `electron .`) — needs the exact exec path + script arg.
   if (process.argv.length >= 2) {
@@ -89,7 +89,7 @@ let isOverlayVisible = true;
 // "Login" opens the real web login page in the user's system browser
 // (never inside an Electron window) with a redirect param pointing back at
 // our custom protocol. After the user authenticates there, the browser
-// redirects to interviewassist://callback?token=..., the OS hands that URL
+// redirects to VijayamAI://callback?token=..., the OS hands that URL
 // to this app (see the deep-link registration above), and the token is used
 // to fetch the account from the backend.
 // `let`, not `const` — loadRemoteConfig() below can override these after a
@@ -239,7 +239,7 @@ function createOverlayWindow() {
   });
 }
 
-// Called with the raw interviewassist://callback?token=... URL, whether it
+// Called with the raw VijayamAI://callback?token=... URL, whether it
 // arrived via 'open-url' (macOS), 'second-instance' (Windows/Linux, already
 // running), or process.argv on a cold launch. Extracts the token and uses it
 // to fetch the account from the backend.
@@ -341,7 +341,7 @@ function createTray() {
     }
   ]);
 
-  tray.setToolTip('Interview Assist — Hidden from screen share');
+  tray.setToolTip('vijayamAI — Hidden from screen share');
   tray.setContextMenu(contextMenu);
 }
 
