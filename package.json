@@ -1,6 +1,6 @@
 {
   "name": "stealth-interview-app",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Screen-hidden AI interview assistant — local Ollama models + continuous voice recognition",
   "main": "main.js",
   "scripts": {
@@ -32,6 +32,11 @@
       "schemes": [
         "interviewassist"
       ]
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "lakshmanvijay",
+      "repo": "interviewassit-Cloude-deployement"
     },
     "win": {
       "target": "nsis",
