@@ -33,6 +33,11 @@
         "interviewassist"
       ]
     },
+    "publish": {
+      "provider": "github",
+      "owner": "lakshmanvijay",
+      "repo": "interviewassit-Cloude-deployement"
+    },
     "win": {
       "target": "nsis",
       "icon": "assets/icon.ico"
