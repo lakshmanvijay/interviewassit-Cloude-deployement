@@ -1,7 +1,7 @@
 const { html } = require('../html');
 const { useStoreSlice } = require('../hooks');
 
-function TitleBar({ store, onToggleListen, onCaptureScreenshot, onClear, onCopy, onMinimize, onOpacityChange, onToggleSettings }) {
+function TitleBar({ store, onToggleListen, onCaptureScreenshot, onClear, onCopy, onMinimize, onOpacityChange, onToggleSettings, onQuit }) {
   const listening     = useStoreSlice(store, s => s.listening);
   const capturing     = useStoreSlice(store, s => s.capturingScreenshot);
   const collapsed     = useStoreSlice(store, s => s.collapsed);
@@ -51,6 +51,11 @@ function TitleBar({ store, onToggleListen, onCaptureScreenshot, onClear, onCopy,
           onClick=${onMinimize}
           title=${collapsed ? 'Expand' : 'Collapse  [Ctrl+Shift+M]'}
         >${collapsed ? '▲' : '−'}</button>
+        <button
+          class="icon-btn" id="close-btn"
+          onClick=${onQuit}
+          title="Close app"
+        >✕</button>
       </div>
     </div>
   `;

@@ -274,6 +274,7 @@ function App({ store }) {
         onMinimize=${minimizeWindow}
         onOpacityChange=${setOpacity}
         onToggleSettings=${toggleSettings}
+        onQuit=${() => ipcRenderer.send('quit-app')}
       />
       <${SettingsPanel} store=${store} onSaveCerebrasKey=${saveCerebrasKey} onSaveGroqKey=${saveGroqKey} onClose=${closeSettings} />
       <${StatusWarning} store=${store} />

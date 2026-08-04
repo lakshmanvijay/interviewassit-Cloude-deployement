@@ -498,6 +498,8 @@ app.on('window-all-closed', () => {
 // ─────────────────────────────────────────────
 ipcMain.on('toggle-overlay', () => toggleOverlay());
 
+ipcMain.on('quit-app', () => app.quit());
+
 ipcMain.on('resize-overlay', (event, { width, height }) => {
   if (overlayWindow) {
     overlayWindow.setSize(width, height);
