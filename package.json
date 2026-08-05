@@ -1,6 +1,6 @@
 {
   "name": "stealth-interview-app",
-  "version": "2.0.2",
+  "version": "1.0.0",
   "description": "Screen-hidden AI interview assistant — local Ollama models + continuous voice recognition",
   "main": "main.js",
   "scripts": {
@@ -26,9 +26,9 @@
   },
   "build": {
     "appId": "com.stealth.interview",
-    "productName": "InterviewAssist",
+    "productName": "VijayamAI",
     "protocols": {
-      "name": "InterviewAssist Auth Callback",
+      "name": "VijayamAI Auth Callback",
       "schemes": [
         "interviewassist"
       ]
@@ -44,7 +44,8 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "VijayamAI-Setup.${ext}"
     }
   }
 }
