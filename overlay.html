@@ -11,7 +11,13 @@
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
   :root {
-    --bg: rgba(8, 10, 14, 0.93);
+    /* Only the background panel fades with the opacity slider — text,
+       icons and borders stay at fixed, fully-legible colors below, since
+       previously the whole window (including text) faded together via
+       Electron's native BrowserWindow.setOpacity(), making everything
+       unreadable at low settings. --bg-alpha is set from JS. */
+    --bg-alpha: 0.93;
+    --bg: rgba(8, 10, 14, var(--bg-alpha));
     --border: rgba(255, 255, 255, 0.06);
     --border-bright: rgba(99, 255, 180, 0.3);
     --accent: #63ffb4;
@@ -289,6 +295,10 @@
   .message-role { font-size: 9px; text-transform: uppercase; letter-spacing: .1em; font-weight: 600; }
   .message.user      .message-role { color: var(--accent2); }
   .message.assistant .message-role { color: var(--accent); }
+  .question-number {
+    font-weight: 800;
+    margin-right: 2px;
+  }
   .message-content {
     font-size: 11px; line-height: 1.65; color: var(--text);
     background: rgba(255,255,255,0.03); border: 1px solid var(--border);
@@ -296,6 +306,9 @@
     white-space: pre-wrap; word-break: break-word; user-select: text;
   }
   .message.user      .message-content { border-color: rgba(79,140,255,0.15); background: rgba(79,140,255,0.05); color: var(--text-dim); }
+  /* Question text itself — bright red so the asked question stands out
+     clearly, even at a low background opacity. */
+  .message.user      .message-content.question-text { color: var(--danger); }
   .message.assistant .message-content { border-color: rgba(99,255,180,0.1); }
   .message.assistant .message-content.streaming::after {
     content: '▋'; color: var(--accent);

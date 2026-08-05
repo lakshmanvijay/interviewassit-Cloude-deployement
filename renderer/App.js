@@ -18,6 +18,7 @@ const { VoiceBar } = require('./components/VoiceBar');
 const { Conversation } = require('./components/Conversation');
 const { InputArea } = require('./components/InputArea');
 
+const FULL_WIDTH = 528; // matches overlayWindow's initial width in main.js
 const FULL_HEIGHT = 640;
 const COLLAPSED_HEIGHT = 44;
 
@@ -154,14 +155,12 @@ function App({ store }) {
     store.setState({ conversation: [], navIndex: -1 });
   }
 
-  function copyLastAnswer() {
-    const last = [...store.getState().conversation].reverse().find(m => m.role === 'assistant');
-    if (last) navigator.clipboard.writeText(last.content);
-  }
-
+  // Only the background panel fades with this — text/icons/borders are
+  // fixed, fully-legible colors in overlay.html's CSS and never dim, unlike
+  // the old native BrowserWindow.setOpacity() which faded everything at once.
   function setOpacity(val) {
     store.setState({ opacity: val });
-    ipcRenderer.send('set-opacity', Number(val) / 100);
+    document.documentElement.style.setProperty('--bg-alpha', ((Number(val) / 100) * 0.93).toFixed(3));
   }
 
   async function captureScreenshot() {
@@ -184,7 +183,7 @@ function App({ store }) {
     const collapsed = !store.getState().collapsed;
     store.setState({ collapsed });
     ipcRenderer.send('resize-overlay', {
-      width: 480,
+      width: FULL_WIDTH,
       height: collapsed ? COLLAPSED_HEIGHT : FULL_HEIGHT
     });
   }
@@ -219,6 +218,10 @@ function App({ store }) {
     // to the main process once at startup — it starts out with no keys.
     sendApiKeysToMain();
 
+    // Apply the store's initial opacity to the background CSS var — nothing
+    // did this before the slider was first touched.
+    setOpacity(store.getState().opacity);
+
     const cleanupScroll = questionNavRef.current.attachScrollListener();
 
     const onDocMouseDown = e => {
@@ -235,7 +238,6 @@ function App({ store }) {
       'clear-conversation':     () => clearConversation(),
       'toggle-listen':          () => voiceControllerRef.current.toggleListen(),
       'trigger-screen-analyze': () => captureScreenshot(),
-      'copy-answer':            () => copyLastAnswer(),
       'toggle-collapse':        () => minimizeWindow(),
       'nav-prev-question':      () => questionNavRef.current.navigateQuestion(-1),
       'nav-next-question':      () => questionNavRef.current.navigateQuestion(+1),
@@ -270,7 +272,6 @@ function App({ store }) {
         onToggleListen=${() => voiceControllerRef.current.toggleListen()}
         onCaptureScreenshot=${captureScreenshot}
         onClear=${clearConversation}
-        onCopy=${copyLastAnswer}
         onMinimize=${minimizeWindow}
         onOpacityChange=${setOpacity}
         onToggleSettings=${toggleSettings}

@@ -90,8 +90,7 @@ Press **Ctrl+Shift+S** to capture the screen and send it to Groq for analysis �
 | `Ctrl+Shift+A` | Quick ask (focus input) |
 | `Ctrl+Shift+C` | Clear conversation |
 | `Ctrl+Shift+S` | Analyze screen |
-| `Ctrl+Shift+X` | Copy last answer |
-| `Ctrl+Shift+,` / `.` | Previous / next question |
+| `Ctrl+Shift+↑` / `↓` | Previous / next question |
 | `Ctrl+Shift+1` / `0` | Jump to first / last question |
 | `Ctrl+Shift+[` / `]` | Decrease / increase opacity |
 | `Ctrl+Alt+Arrows` | Move the overlay window |

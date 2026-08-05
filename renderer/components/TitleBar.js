@@ -1,7 +1,7 @@
 const { html } = require('../html');
 const { useStoreSlice } = require('../hooks');
 
-function TitleBar({ store, onToggleListen, onCaptureScreenshot, onClear, onCopy, onMinimize, onOpacityChange, onToggleSettings, onQuit }) {
+function TitleBar({ store, onToggleListen, onCaptureScreenshot, onClear, onMinimize, onOpacityChange, onToggleSettings, onQuit }) {
   const listening     = useStoreSlice(store, s => s.listening);
   const capturing     = useStoreSlice(store, s => s.capturingScreenshot);
   const collapsed     = useStoreSlice(store, s => s.collapsed);
@@ -21,8 +21,8 @@ function TitleBar({ store, onToggleListen, onCaptureScreenshot, onClear, onCopy,
           class="icon-btn ${listening ? 'listening' : ''}"
           id="mic-btn"
           onClick=${onToggleListen}
-          title="🔊 Listen  [Ctrl+Shift+L]"
-        >🔊</button>
+          title="🎤 Listen  [Ctrl+Shift+L]"
+        >🎤</button>
         <button
           class="icon-btn"
           id="analyze-btn"
@@ -31,7 +31,6 @@ function TitleBar({ store, onToggleListen, onCaptureScreenshot, onClear, onCopy,
           title="📸 Screenshot  [Ctrl+Shift+S]"
         >${capturing ? '⏳' : '📸'}</button>
         <button class="icon-btn" onClick=${onClear} title="⟳ Clear  [Ctrl+Shift+C]">⟳</button>
-        <button class="icon-btn" onClick=${onCopy} title="⎘ Copy answer  [Ctrl+Shift+X]">⎘</button>
         <button
           class="icon-btn avatar-btn ${settingsOpen ? 'active' : ''}"
           id="settings-gear-btn"

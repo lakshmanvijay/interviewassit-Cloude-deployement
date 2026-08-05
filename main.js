@@ -192,9 +192,9 @@ function createOverlayWindow() {
   const { width, height } = screen.getPrimaryDisplay().workAreaSize;
 
   overlayWindow = new BrowserWindow({
-    width: 480,
+    width: 528, // 480 + ~half inch (48px @ 96dpi)
     height: 640,
-    x: width - 500,
+    x: width - 548, // keeps the same 20px right-edge margin as before
     y: 40,
     frame: false,
     transparent: true,
@@ -419,11 +419,6 @@ app.whenReady().then(() => {
     }
   });
 
-  // Ctrl+Shift+X — copy last answer
-  globalShortcut.register('CommandOrControl+Shift+X', () => {
-    if (overlayWindow) overlayWindow.webContents.send('copy-answer');
-  });
-
   // Ctrl+Shift+M — collapse / expand
   globalShortcut.register('CommandOrControl+Shift+M', () => {
     if (overlayWindow) {
@@ -432,11 +427,11 @@ app.whenReady().then(() => {
     }
   });
 
-  // Ctrl+Shift+, / . — navigate previous / next question
-  globalShortcut.register('CommandOrControl+Shift+,', () => {
+  // Ctrl+Shift+Up / Down — navigate previous / next question
+  globalShortcut.register('CommandOrControl+Shift+Up', () => {
     if (overlayWindow) overlayWindow.webContents.send('nav-prev-question');
   });
-  globalShortcut.register('CommandOrControl+Shift+.', () => {
+  globalShortcut.register('CommandOrControl+Shift+Down', () => {
     if (overlayWindow) overlayWindow.webContents.send('nav-next-question');
   });
 
@@ -467,7 +462,8 @@ app.whenReady().then(() => {
   globalShortcut.register('CommandOrControl+Alt+Right', () => {
     if (!overlayWindow) return;
     const [x, y] = overlayWindow.getPosition();
-    overlayWindow.setPosition(Math.min(sw - 480, x + MOVE_STEP), y);
+    const [w] = overlayWindow.getSize();
+    overlayWindow.setPosition(Math.min(sw - w, x + MOVE_STEP), y);
   });
   globalShortcut.register('CommandOrControl+Alt+Up', () => {
     if (!overlayWindow) return;
@@ -504,10 +500,6 @@ ipcMain.on('resize-overlay', (event, { width, height }) => {
   if (overlayWindow) {
     overlayWindow.setSize(width, height);
   }
-});
-
-ipcMain.on('set-opacity', (event, opacity) => {
-  if (overlayWindow) overlayWindow.setOpacity(opacity);
 });
 
 // Renderer's settings dropdown pastes in the user's own keys — used for
