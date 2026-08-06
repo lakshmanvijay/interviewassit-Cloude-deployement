@@ -1,5 +1,6 @@
 const { app, BrowserWindow, globalShortcut, ipcMain, screen, Tray, Menu, nativeImage, session, desktopCapturer, shell } = require('electron');
 const { autoUpdater } = require('electron-updater');
+const log = require('electron-log');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
@@ -11,17 +12,50 @@ const https = require('https');
 // this only ever runs inside app.whenReady() guarded by app.isPackaged.
 const AUTO_UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
 
+// Set once an update finishes downloading. Kept outside setupAutoUpdater so
+// notifyRenderer() can re-send it whenever a fresh overlayWindow finishes
+// loading, instead of relying on the 'update-downloaded' event firing at
+// the one moment a live, loaded overlayWindow happens to exist.
+let pendingUpdateVersion = null;
+
+function notifyRenderer() {
+  if (pendingUpdateVersion && overlayWindow && !overlayWindow.webContents.isLoading()) {
+    overlayWindow.webContents.send('update-ready', { version: pendingUpdateVersion });
+  }
+}
+
 function setupAutoUpdater() {
+  // A packaged app has no console — route logs to a file so update failures
+  // are actually diagnosable. Written to
+  // %APPDATA%/<AppName>/logs/main.log on Windows.
+  log.transports.file.level = 'debug';
+  log.transports.console.level = 'debug';
+  autoUpdater.logger = log;
+
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
 
+  autoUpdater.on('checking-for-update', () => {
+    log.info('[update] checking for update');
+  });
+  autoUpdater.on('update-available', info => {
+    log.info('[update] available:', info.version);
+  });
+  autoUpdater.on('update-not-available', info => {
+    log.info('[update] none available, current:', info && info.version);
+  });
+  autoUpdater.on('download-progress', progress => {
+    log.debug(`[update] downloading: ${Math.round(progress.percent)}%`);
+  });
   autoUpdater.on('update-downloaded', info => {
-    if (overlayWindow) overlayWindow.webContents.send('update-ready', { version: info.version });
+    log.info('[update] downloaded:', info.version);
+    pendingUpdateVersion = info.version;
+    notifyRenderer();
   });
   autoUpdater.on('error', err => {
     // Background check failures are never surfaced to the user — same as
     // how a browser silently retries later instead of showing an error.
-    console.error('[update] error:', err.message);
+    log.error('[update] error:', err);
   });
 
   autoUpdater.checkForUpdates();
@@ -211,6 +245,7 @@ function createOverlayWindow() {
   });
 
   overlayWindow.loadFile('overlay.html');
+  overlayWindow.webContents.on('did-finish-load', notifyRenderer);
   if (process.env.OPEN_DEVTOOLS) overlayWindow.webContents.openDevTools({ mode: 'detach' });
   if (process.env.DEBUG_CONSOLE) {
     overlayWindow.webContents.on('console-message', (e, level, message, line, sourceId) => {
@@ -538,7 +573,15 @@ ipcMain.on('logout', () => {
   if (overlayWindow) overlayWindow.webContents.send('logged-out');
 });
 
-ipcMain.on('restart-and-install', () => autoUpdater.quitAndInstall());
+ipcMain.on('restart-and-install', () => {
+  log.info('[update] user requested restart-and-install, version:', pendingUpdateVersion);
+  // setImmediate defers past the current event-loop tick so this doesn't
+  // race whatever triggered it (e.g. a renderer IPC send mid-flight).
+  // quitAndInstall(isSilent=false, isForceRunAfter=true): show the NSIS
+  // installer UI (so an elevation prompt, if needed, isn't invisible) and
+  // force the app back open afterward regardless of how quit() was reached.
+  setImmediate(() => autoUpdater.quitAndInstall(false, true));
+});
 
 // Returns screen sources so the renderer can use chromeMediaSource:'desktop'
 // to capture system audio (WASAPI loopback) without touching the microphone.
