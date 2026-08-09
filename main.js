@@ -577,10 +577,12 @@ ipcMain.on('restart-and-install', () => {
   log.info('[update] user requested restart-and-install, version:', pendingUpdateVersion);
   // setImmediate defers past the current event-loop tick so this doesn't
   // race whatever triggered it (e.g. a renderer IPC send mid-flight).
-  // quitAndInstall(isSilent=false, isForceRunAfter=true): show the NSIS
-  // installer UI (so an elevation prompt, if needed, isn't invisible) and
-  // force the app back open afterward regardless of how quit() was reached.
-  setImmediate(() => autoUpdater.quitAndInstall(false, true));
+  // quitAndInstall(isSilent=true, isForceRunAfter=true): run the NSIS
+  // installer with /S (fully silent — no install wizard, no Next/Next/
+  // Finish) since installs here are per-user (no perMachine in the nsis
+  // config, so no UAC elevation is needed either), then force the app
+  // back open afterward regardless of how quit() was reached.
+  setImmediate(() => autoUpdater.quitAndInstall(true, true));
 });
 
 // Returns screen sources so the renderer can use chromeMediaSource:'desktop'

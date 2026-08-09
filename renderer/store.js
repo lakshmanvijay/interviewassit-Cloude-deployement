@@ -39,7 +39,7 @@ const store = createStore({
   collapsed: false,
   sendDisabled: false,
   capturingScreenshot: false,
-  opacity: 93,
+  opacity: 72,
   cerebrasApiKey: '',
   groqApiKey: '',
   settingsOpen: false,
