@@ -28,6 +28,7 @@ function createStore(initialState) {
 const store = createStore({
   mode: 'interview',
   model: 'gpt-oss-120b',
+  proficiencyLevel: 'intermediate',  // 'basic' | 'intermediate' | 'advanced' — shapes answer language, see lib/prompts.js
   conversation: [],        // [{ id, role, content, streaming }]
   navIndex: -1,
   pendingScreenshots: [],
@@ -39,7 +40,7 @@ const store = createStore({
   collapsed: false,
   sendDisabled: false,
   capturingScreenshot: false,
-  opacity: 72,
+  opacity: 90,
   cerebrasApiKey: '',
   groqApiKey: '',
   settingsOpen: false,

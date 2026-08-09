@@ -161,12 +161,14 @@
     font-size: 9px; color: var(--text-dimmer);
     text-transform: uppercase; letter-spacing: .08em;
   }
-  .settings-row input {
+  .settings-row input, .settings-row select {
     background: rgba(255,255,255,0.05); border: 1px solid var(--border);
     border-radius: 6px; color: var(--text); font-family: var(--mono);
     font-size: 11px; padding: 6px 8px; outline: none;
   }
-  .settings-row input:focus { border-color: rgba(99,255,180,0.3); }
+  .settings-row input:focus, .settings-row select:focus { border-color: rgba(99,255,180,0.3); }
+  .settings-row select { cursor: pointer; }
+  .settings-row select option { background: #0d1117; color: var(--text); }
   .settings-hint { font-size: 9px; color: var(--text-dimmer); line-height: 1.5; }
   .settings-ok-btn {
     align-self: flex-end;

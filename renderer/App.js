@@ -60,8 +60,8 @@ function App({ store }) {
     // History is captured *before* the assistant placeholder is appended,
     // so it never includes the in-flight streaming answer.
     const history = store.getState().conversation.slice(-2).map(m => ({ role: m.role, content: m.content }));
-    const { mode, model, resumeText } = store.getState();
-    const messages = [{ role: 'system', content: getSystemPrompt(mode, resumeText) }, ...history];
+    const { mode, model, resumeText, proficiencyLevel } = store.getState();
+    const messages = [{ role: 'system', content: getSystemPrompt(mode, resumeText, proficiencyLevel) }, ...history];
 
     const assistantId = genId();
     store.setState(s => ({ conversation: [...s.conversation, { id: assistantId, role: 'assistant', content: '', streaming: true }] }));
