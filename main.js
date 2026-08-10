@@ -102,18 +102,9 @@ app.on('open-url', (event, url) => {
 // ── API KEYS ──────────────────────────────────────
 // User-supplied via the renderer's settings dropdown (see 'set-api-keys'
 // below) take priority; env vars are just a fallback for local dev.
-let CEREBRAS_API_KEY = process.env.CEREBRAS_API_KEY || '';
-let GROQ_API_KEY     = process.env.GROQ_API_KEY || '';
-let cerebrasClient = null;
-function getCerebrasClient() {
-  if (!cerebrasClient) {
-    // Deferred until the first chat request — this SDK alone takes ~300ms to
-    // require(), which used to run unconditionally before the window even opened.
-    const Cerebras = require('@cerebras/cerebras_cloud_sdk');
-    cerebrasClient = new Cerebras({ apiKey: CEREBRAS_API_KEY });
-  }
-  return cerebrasClient;
-}
+// Chat answers no longer use a client-side key — they stream through our own
+// backend over WebSocket, which holds its own server-side Cerebras key.
+let GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 
 let overlayWindow = null;
 let tray = null;
@@ -537,13 +528,9 @@ ipcMain.on('resize-overlay', (event, { width, height }) => {
   }
 });
 
-// Renderer's settings dropdown pastes in the user's own keys — used for
-// AI answers (Cerebras) and voice-to-text + screenshot analysis (Groq).
-ipcMain.on('set-api-keys', (event, { cerebrasApiKey, groqApiKey } = {}) => {
-  if (typeof cerebrasApiKey === 'string' && cerebrasApiKey !== CEREBRAS_API_KEY) {
-    CEREBRAS_API_KEY = cerebrasApiKey;
-    cerebrasClient = null; // force getCerebrasClient() to rebuild with the new key
-  }
+// Renderer's settings dropdown pastes in the user's own key — used for
+// voice-to-text + screenshot analysis (Groq).
+ipcMain.on('set-api-keys', (event, { groqApiKey } = {}) => {
   if (typeof groqApiKey === 'string') {
     GROQ_API_KEY = groqApiKey;
   }
@@ -573,6 +560,25 @@ ipcMain.on('logout', () => {
   if (overlayWindow) overlayWindow.webContents.send('logged-out');
 });
 
+// Exposes the JWT to the renderer so it can open the interview-answers
+// WebSocket directly (native browser WebSocket only exists in the renderer,
+// not in this Node main process). contextIsolation is already off for this
+// window, so the renderer has full main-process-equivalent access anyway —
+// this doesn't cross a security boundary that isn't already crossed.
+ipcMain.handle('get-session-token', () => sessionToken);
+
+// Derives the WS endpoint from the same (possibly remote-config-overridden)
+// host as LOGIN_API_URL, so it never drifts out of sync with it.
+ipcMain.handle('get-ws-url', () => {
+  try {
+    const api = new URL(LOGIN_API_URL);
+    const scheme = api.protocol === 'https:' ? 'wss' : 'ws';
+    return `${scheme}://${api.host}/ws/interview`;
+  } catch (e) {
+    return null;
+  }
+});
+
 ipcMain.on('restart-and-install', () => {
   log.info('[update] user requested restart-and-install, version:', pendingUpdateVersion);
   // setImmediate defers past the current event-loop tick so this doesn't
@@ -593,48 +599,6 @@ ipcMain.handle('get-desktop-sources', async () => {
     return sources.map(s => ({ id: s.id, name: s.name }));
   } catch (e) {
     return [];
-  }
-});
-
-// ─────────────────────────────────────────────
-// CEREBRAS API BRIDGE  (official SDK)
-// ─────────────────────────────────────────────
-ipcMain.on('cerebras-chat', async (event, { id, model, messages }) => {
-  const wc = event.sender;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 60000);
-  try {
-    const client = getCerebrasClient();
-    const stream = await client.chat.completions.create({
-      model: model || 'llama3.1-8b',
-      messages,
-      stream: true,
-      stream_options: { include_usage: true },
-      max_completion_tokens: 900,
-      temperature: 0.1,
-      top_p: 1,
-    }, { signal: controller.signal });
-
-    for await (const chunk of stream) {
-      clearTimeout(timeout);
-      const delta = chunk.choices?.[0]?.delta?.content;
-      if (delta && !wc.isDestroyed()) wc.send('cerebras-chunk', { id, delta });
-      // The system prompt (base instructions + resume text) is a stable,
-      // byte-identical prefix across turns in the same session, so Cerebras'
-      // own KV-cache reuse (same mechanism as OpenAI's automatic prompt
-      // caching — no special request shape needed) kicks in on its own.
-      // This just makes that reuse visible instead of invisible.
-      if (chunk.usage) {
-        const cached = chunk.usage.prompt_tokens_details?.cached_tokens || 0;
-        console.log(`[cerebras] prompt_tokens=${chunk.usage.prompt_tokens} cached_tokens=${cached}`);
-      }
-    }
-    if (!wc.isDestroyed()) wc.send('cerebras-done', { id });
-  } catch (err) {
-    const msg = err.name === 'AbortError' ? 'Request timed out — try again' : err.message;
-    if (!wc.isDestroyed()) wc.send('cerebras-error', { id, error: msg });
-  } finally {
-    clearTimeout(timeout);
   }
 });
 

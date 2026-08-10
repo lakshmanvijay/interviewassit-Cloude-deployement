@@ -41,7 +41,6 @@ const store = createStore({
   sendDisabled: false,
   capturingScreenshot: false,
   opacity: 90,
-  cerebrasApiKey: '',
   groqApiKey: '',
   settingsOpen: false,
   account: null,   // { id, name, email, provider, avatar, plan, joinedAt, resume } once received from the web app's login, or null

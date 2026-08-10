@@ -1,0 +1,12 @@
+# Launches the app pointed at a LOCAL backend instead of Railway.
+# Requires your backend running at localhost:8080 (and, if you use one, a
+# local web login page at localhost:5173) — start those first.
+#
+# Usage:  .\run-local.ps1
+
+$env:INTERVIEWASSIST_WEB_LOGIN_URL = "http://localhost:5173/login"
+$env:INTERVIEWASSIST_LOGIN_API_URL = "http://localhost:8080/api/auth/login"
+$env:OPEN_DEVTOOLS = "1"
+$env:DEBUG_CONSOLE = "1"
+
+npm start
