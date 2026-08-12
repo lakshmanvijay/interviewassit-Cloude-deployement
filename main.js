@@ -1,10 +1,29 @@
-const { app, BrowserWindow, globalShortcut, ipcMain, screen, Tray, Menu, nativeImage, session, desktopCapturer, shell } = require('electron');
+const { app, BrowserWindow, globalShortcut, ipcMain, screen, Tray, Menu, nativeImage, session, desktopCapturer, shell, safeStorage } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const log = require('electron-log');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
+const { HUMAN_STYLE } = require('./renderer/lib/prompts');
+
+// ── CRASH RESILIENCE ───────────────────────────────
+// There's exactly one main process for the whole app — an uncaught
+// exception ANYWHERE in it (a stray IPC send to a disposed frame, a bad
+// network callback, anything) otherwise takes the entire app down
+// silently, including the tray icon. For a background/tray app that's
+// supposed to keep running, logging and continuing is the right default —
+// the alternative (crashing) is strictly worse for every error class this
+// app actually throws today. electron-log's file transport still hasn't
+// been configured yet at this point (that happens in setupAutoUpdater()),
+// so console.error is the only sink available this early — it'll show up
+// in main.log too once a packaged app's default console transport kicks in.
+process.on('uncaughtException', err => {
+  console.error('[fatal] uncaught exception (app kept running):', err);
+});
+process.on('unhandledRejection', reason => {
+  console.error('[fatal] unhandled promise rejection (app kept running):', reason);
+});
 
 // ── AUTO-UPDATE (Chrome/Discord-style — silent background download, no
 // native dialog; only a renderer-side banner once an update is ready) ──
@@ -19,8 +38,8 @@ const AUTO_UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
 let pendingUpdateVersion = null;
 
 function notifyRenderer() {
-  if (pendingUpdateVersion && overlayWindow && !overlayWindow.webContents.isLoading()) {
-    overlayWindow.webContents.send('update-ready', { version: pendingUpdateVersion });
+  if (pendingUpdateVersion && overlayWindow && !overlayWindow.isDestroyed() && !overlayWindow.webContents.isDestroyed() && !overlayWindow.webContents.isLoading()) {
+    sendToOverlay('update-ready', { version: pendingUpdateVersion });
   }
 }
 
@@ -101,14 +120,55 @@ app.on('open-url', (event, url) => {
 
 // ── API KEYS ──────────────────────────────────────
 // User-supplied via the renderer's settings dropdown (see 'set-api-keys'
-// below) take priority; env vars are just a fallback for local dev.
-// Chat answers no longer use a client-side key — they stream through our own
-// backend over WebSocket, which holds its own server-side Cerebras key.
-let GROQ_API_KEY = process.env.GROQ_API_KEY || '';
+// below) take priority; env vars are just a fallback for local dev. Used
+// for voice-to-text (Groq Whisper) and screenshot analysis (Cerebras
+// vision) — chat answers still go through our own backend over WebSocket,
+// unaffected by either key.
+let GROQ_API_KEY     = process.env.GROQ_API_KEY || '';
+let CEREBRAS_API_KEY = process.env.CEREBRAS_API_KEY || '';
+
+let cerebrasClient = null;
+function getCerebrasClient() {
+  if (!cerebrasClient) {
+    // Deferred until the first vision request — this SDK alone takes
+    // ~300ms to require(), which used to run unconditionally before the
+    // window even opened. Same convention used for pdf-parse below.
+    const Cerebras = require('@cerebras/cerebras_cloud_sdk');
+    cerebrasClient = new Cerebras({ apiKey: CEREBRAS_API_KEY });
+  }
+  return cerebrasClient;
+}
 
 let overlayWindow = null;
 let tray = null;
 let isOverlayVisible = true;
+// Set true only once a real quit is actually underway (see 'before-quit'
+// below) — lets the window's own 'close' handler tell an OS-level close
+// signal (Alt+F4, etc.) apart from an intentional app.quit() call.
+let isQuitting = false;
+
+// Every call site that pings the renderer used to just check `if
+// (overlayWindow)` — but that only proves the JS reference is non-null, not
+// that the underlying native window/webContents hasn't already been torn
+// down (a real gap: global shortcuts and post-await callbacks can fire in
+// that exact window, e.g. right as the app is quitting). The isDestroyed()
+// checks catch most of that, but Electron has a known extra edge case:
+// webContents.isDestroyed() can still report false for a brief window
+// while the internal render frame itself is already gone, throwing
+// "Render frame was disposed before WebFrameMain could be accessed" —
+// an uncaught exception here crashes the entire main process (there's
+// only one, for the whole app), which is almost certainly what's been
+// causing the app to close itself unexpectedly. The try/catch is the
+// actual guarantee; the isDestroyed() checks are just the fast path that
+// avoids the (logged, harmless) exception in the common case.
+function sendToOverlay(channel, ...args) {
+  if (!overlayWindow || overlayWindow.isDestroyed() || overlayWindow.webContents.isDestroyed()) return;
+  try {
+    overlayWindow.webContents.send(channel, ...args);
+  } catch (e) {
+    log.warn('[sendToOverlay] send failed, window frame likely disposed:', e.message);
+  }
+}
 
 // ── LOGIN (system-browser + deep-link hand-off) ───
 // "Login" opens the real web login page in the user's system browser
@@ -120,6 +180,38 @@ let isOverlayVisible = true;
 let WEB_LOGIN_URL = process.env.INTERVIEWASSIST_WEB_LOGIN_URL || 'https://vijayamai.com/login';
 let LOGIN_API_URL = process.env.INTERVIEWASSIST_LOGIN_API_URL || 'https://interview-backend-production-c8b5.up.railway.app/api/auth/login';
 let sessionToken = null;
+
+// ── SESSION PERSISTENCE ────────────────────────────
+// Without this, sessionToken only ever lived in memory — every restart
+// wiped it, forcing the full browser login dance again. Persisted encrypted
+// via safeStorage (OS-level: DPAPI on Windows) so the token never sits on
+// disk in plaintext; if encryption isn't available on this machine, the
+// session just isn't persisted (fails safe — requires login again — rather
+// than falling back to storing it unencrypted).
+const SESSION_FILE = path.join(app.getPath('userData'), 'session.dat');
+
+function saveSessionToken(token) {
+  try {
+    if (!safeStorage.isEncryptionAvailable()) return;
+    fs.writeFileSync(SESSION_FILE, safeStorage.encryptString(token));
+  } catch (e) {
+    console.error('[session] failed to persist token:', e.message);
+  }
+}
+
+function loadSessionToken() {
+  try {
+    if (!safeStorage.isEncryptionAvailable() || !fs.existsSync(SESSION_FILE)) return null;
+    return safeStorage.decryptString(fs.readFileSync(SESSION_FILE));
+  } catch (e) {
+    console.error('[session] failed to load persisted token:', e.message);
+    return null;
+  }
+}
+
+function clearSessionToken() {
+  try { fs.unlinkSync(SESSION_FILE); } catch (e) {}
+}
 
 // ── REMOTE CONFIG ──────────────────────────────────
 // Lets us repoint the login URLs for every installed user by editing a JSON
@@ -168,7 +260,7 @@ loadRemoteConfig();
 // answers about the candidate's background/previous projects. Truncated to
 // keep prompt size sane; parsing failures (non-PDF, unreachable) just leave
 // this empty rather than breaking login.
-const RESUME_TEXT_MAX_CHARS = 6000;
+const RESUME_TEXT_MAX_CHARS = 8000;
 let resumeText = '';
 
 // Plain http/https GET into a Buffer — same raw-request style already used
@@ -237,6 +329,7 @@ function createOverlayWindow() {
 
   overlayWindow.loadFile('overlay.html');
   overlayWindow.webContents.on('did-finish-load', notifyRenderer);
+  overlayWindow.webContents.on('did-finish-load', notifyAccountRenderer);
   if (process.env.OPEN_DEVTOOLS) overlayWindow.webContents.openDevTools({ mode: 'detach' });
   if (process.env.DEBUG_CONSOLE) {
     overlayWindow.webContents.on('console-message', (e, level, message, line, sourceId) => {
@@ -250,6 +343,21 @@ function createOverlayWindow() {
   overlayWindow.setAlwaysOnTop(true, 'screen-saver', 1);
   overlayWindow.setVisibleOnAllWorkspaces(true);
 
+  // Alt+F4 (or any other OS-level close signal) sends a 'close' event
+  // straight to this window, bypassing app.quit() entirely — previously
+  // that fell through to 'window-all-closed' and silently killed the
+  // whole app, including the tray icon. Intercept it and just hide instead,
+  // same as the taskbar/tray "Toggle Overlay" behavior — unless a real
+  // quit is already underway (tray Quit, the titlebar's Close button,
+  // auto-update's quitAndInstall), in which case let it actually close.
+  overlayWindow.on('close', event => {
+    if (!isQuitting) {
+      event.preventDefault();
+      overlayWindow.hide();
+      isOverlayVisible = false;
+    }
+  });
+
   overlayWindow.on('closed', () => {
     overlayWindow = null;
   });
@@ -258,8 +366,53 @@ function createOverlayWindow() {
   // with no way to restore. Redirect to our custom collapse instead.
   overlayWindow.on('minimize', () => {
     overlayWindow.restore();
-    overlayWindow.webContents.send('toggle-collapse');
+    sendToOverlay('toggle-collapse');
   });
+}
+
+// Set once an account is successfully fetched (fresh login or a restored
+// session) so it can be re-sent whenever a fresh overlayWindow finishes
+// loading — the fetch can easily resolve before the renderer's IPC
+// listeners exist yet, same reasoning as pendingUpdateVersion/
+// notifyRenderer above.
+let pendingAccount = null;
+
+function notifyAccountRenderer() {
+  if (pendingAccount) sendToOverlay('account-received', pendingAccount);
+  if (resumeText) sendToOverlay('resume-parsed', resumeText);
+}
+
+// Shared by both the deep-link login flow and the startup session-restore
+// below — given a token, validates it against the backend and populates
+// the renderer with the account either way.
+function activateSession(token) {
+  sessionToken = token;
+  saveSessionToken(token);
+
+  fetchAccountFromApi(token)
+    .then(account => {
+      if (!account) return;
+      pendingAccount = account;
+      notifyAccountRenderer();
+
+      if (account.resume) {
+        parseResume(account.resume).then(text => {
+          resumeText = text;
+          if (text) sendToOverlay('resume-parsed', text);
+        });
+      }
+    })
+    .catch(e => {
+      console.error('[login] failed to fetch account from API:', e.message);
+      // Only a real "this token is no good" response should drop the
+      // persisted session — a transient network error (offline at
+      // startup, backend hiccup) shouldn't sign the user out, just fail
+      // silently this once and retry on next launch.
+      if (/Login API returned 40[13]/.test(e.message)) {
+        sessionToken = null;
+        clearSessionToken();
+      }
+    });
 }
 
 // Called with the raw interviewassist://callback?token=... URL, whether it
@@ -275,21 +428,7 @@ function handleAuthCallback(rawUrl) {
     return;
   }
   if (!token) return;
-
-  sessionToken = token;
-  fetchAccountFromApi(token)
-    .then(account => {
-      if (!account) return;
-      if (overlayWindow) overlayWindow.webContents.send('account-received', account);
-
-      if (account.resume) {
-        parseResume(account.resume).then(text => {
-          resumeText = text;
-          if (text && overlayWindow) overlayWindow.webContents.send('resume-parsed', text);
-        });
-      }
-    })
-    .catch(e => console.error('[login] failed to fetch account from API:', e.message));
+  activateSession(token);
 }
 
 // Response shape isn't fully known — handled defensively as either
@@ -364,7 +503,7 @@ function createTray() {
     }
   ]);
 
-  tray.setToolTip('Interview Assist — Hidden from screen share');
+  tray.setToolTip('VijayamAI — Hidden from screen share');
   tray.setContextMenu(contextMenu);
 }
 
@@ -395,6 +534,14 @@ app.whenReady().then(() => {
   createTray();
   if (app.isPackaged) setupAutoUpdater();
 
+  // Restore a previous session instead of forcing the user through the
+  // browser login flow on every single launch — kicked off here so the
+  // network round-trip overlaps with the window still loading; the account
+  // gets delivered via notifyAccountRenderer() on did-finish-load either
+  // way, so it doesn't matter which finishes first.
+  const savedToken = loadSessionToken();
+  if (savedToken) activateSession(savedToken);
+
   // Cold launch via the deep link on Windows/Linux (not already running,
   // so there's no 'second-instance' event) — the URL arrives as an argv.
   const launchUrl = process.argv.find(arg => arg.startsWith(`${PROTOCOL}://`));
@@ -404,7 +551,7 @@ app.whenReady().then(() => {
   globalShortcut.register('CommandOrControl+M', () => {
     if (overlayWindow) {
       if (!isOverlayVisible) toggleOverlay();
-      overlayWindow.webContents.send('toggle-collapse');
+      sendToOverlay('toggle-collapse');
     }
   });
 
@@ -415,33 +562,31 @@ app.whenReady().then(() => {
   globalShortcut.register('CommandOrControl+Shift+A', () => {
     if (overlayWindow && isOverlayVisible) {
       overlayWindow.focus();
-      overlayWindow.webContents.send('focus-input');
+      sendToOverlay('focus-input');
     } else if (!isOverlayVisible) {
       toggleOverlay();
       setTimeout(() => {
-        overlayWindow.focus();
-        overlayWindow.webContents.send('focus-input');
+        if (overlayWindow) overlayWindow.focus();
+        sendToOverlay('focus-input');
       }, 100);
     }
   });
 
   globalShortcut.register('CommandOrControl+Shift+C', () => {
-    if (overlayWindow) {
-      overlayWindow.webContents.send('clear-conversation');
-    }
+    sendToOverlay('clear-conversation');
   });
 
   globalShortcut.register('CommandOrControl+Shift+L', () => {
     if (overlayWindow) {
       if (!isOverlayVisible) toggleOverlay();
-      overlayWindow.webContents.send('toggle-listen');
+      sendToOverlay('toggle-listen');
     }
   });
 
   globalShortcut.register('CommandOrControl+Shift+S', () => {
     if (overlayWindow) {
       if (!isOverlayVisible) toggleOverlay();
-      overlayWindow.webContents.send('trigger-screen-analyze');
+      sendToOverlay('trigger-screen-analyze');
     }
   });
 
@@ -449,32 +594,32 @@ app.whenReady().then(() => {
   globalShortcut.register('CommandOrControl+Shift+M', () => {
     if (overlayWindow) {
       if (!isOverlayVisible) toggleOverlay();
-      overlayWindow.webContents.send('toggle-collapse');
+      sendToOverlay('toggle-collapse');
     }
   });
 
   // Ctrl+Shift+Up / Down — navigate previous / next question
   globalShortcut.register('CommandOrControl+Shift+Up', () => {
-    if (overlayWindow) overlayWindow.webContents.send('nav-prev-question');
+    sendToOverlay('nav-prev-question');
   });
   globalShortcut.register('CommandOrControl+Shift+Down', () => {
-    if (overlayWindow) overlayWindow.webContents.send('nav-next-question');
+    sendToOverlay('nav-next-question');
   });
 
   // Ctrl+Shift+1 / 0 — jump to first / last question
   globalShortcut.register('CommandOrControl+Shift+1', () => {
-    if (overlayWindow) overlayWindow.webContents.send('jump-to-first-question');
+    sendToOverlay('jump-to-first-question');
   });
   globalShortcut.register('CommandOrControl+Shift+0', () => {
-    if (overlayWindow) overlayWindow.webContents.send('jump-to-last-question');
+    sendToOverlay('jump-to-last-question');
   });
 
   // Ctrl+Shift+[ / ] — opacity down / up
   globalShortcut.register('CommandOrControl+Shift+[', () => {
-    if (overlayWindow) overlayWindow.webContents.send('opacity-step', -10);
+    sendToOverlay('opacity-step', -10);
   });
   globalShortcut.register('CommandOrControl+Shift+]', () => {
-    if (overlayWindow) overlayWindow.webContents.send('opacity-step', +10);
+    sendToOverlay('opacity-step', +10);
   });
 
   // Ctrl+Alt+Arrows — move window 60 px per press
@@ -507,6 +652,15 @@ app.whenReady().then(() => {
   });
 });
 
+// Fires for every real quit path (tray Quit, the titlebar Close button,
+// quitAndInstall during auto-update) before any window actually closes —
+// this is what lets overlayWindow's own 'close' handler above tell an
+// intentional quit apart from an OS-level close signal (Alt+F4) that
+// bypasses app.quit() entirely.
+app.on('before-quit', () => {
+  isQuitting = true;
+});
+
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
 });
@@ -528,11 +682,19 @@ ipcMain.on('resize-overlay', (event, { width, height }) => {
   }
 });
 
-// Renderer's settings dropdown pastes in the user's own key — used for
-// voice-to-text + screenshot analysis (Groq).
-ipcMain.on('set-api-keys', (event, { groqApiKey } = {}) => {
-  if (typeof groqApiKey === 'string') {
+// Renderer's settings dropdown pastes in the user's own keys — Groq for
+// voice-to-text, Cerebras for screenshot analysis. Only overwrite on a
+// non-empty value: the renderer fires this once on every launch with
+// whatever's in the store (which starts out as '' until Settings is
+// filled in), and a plain `typeof === 'string'` check let that empty
+// string clobber the env-var fallback below on every single startup.
+ipcMain.on('set-api-keys', (event, { groqApiKey, cerebrasApiKey } = {}) => {
+  if (groqApiKey) {
     GROQ_API_KEY = groqApiKey;
+  }
+  if (cerebrasApiKey && cerebrasApiKey !== CEREBRAS_API_KEY) {
+    CEREBRAS_API_KEY = cerebrasApiKey;
+    cerebrasClient = null; // force getCerebrasClient() to rebuild with the new key
   }
 });
 
@@ -556,8 +718,10 @@ ipcMain.on('start-login', () => {
 // out of the web app itself (if desired) has to happen in that browser.
 ipcMain.on('logout', () => {
   sessionToken = null;
+  pendingAccount = null;
   resumeText = '';
-  if (overlayWindow) overlayWindow.webContents.send('logged-out');
+  clearSessionToken();
+  sendToOverlay('logged-out');
 });
 
 // Exposes the JWT to the renderer so it can open the interview-answers
@@ -569,11 +733,13 @@ ipcMain.handle('get-session-token', () => sessionToken);
 
 // Derives the WS endpoint from the same (possibly remote-config-overridden)
 // host as LOGIN_API_URL, so it never drifts out of sync with it.
-ipcMain.handle('get-ws-url', () => {
+// `path` defaults to the interview-answers socket; pass '/ws/stt' for the
+// live speech-to-text socket — same host, same auth, different route.
+ipcMain.handle('get-ws-url', (event, path) => {
   try {
     const api = new URL(LOGIN_API_URL);
     const scheme = api.protocol === 'https:' ? 'wss' : 'ws';
-    return `${scheme}://${api.host}/ws/interview`;
+    return `${scheme}://${api.host}${path || '/ws/interview'}`;
   } catch (e) {
     return null;
   }
@@ -609,27 +775,53 @@ ipcMain.handle('capture-screenshot', async () => {
   try {
     const sources = await desktopCapturer.getSources({
       types: ['screen'],
-      thumbnailSize: { width: 1920, height: 1080 }
+      // 1280x720 instead of the old 1920x1080 — vision APIs tokenize images
+      // by tiling them (~512px tiles), so this roughly halves the tile
+      // count (and token cost) per screenshot while staying sharp enough
+      // to read on-screen text/code. Needed headroom for multiple
+      // screenshots in one request without hitting Groq's TPM limit.
+      thumbnailSize: { width: 1280, height: 720 }
     });
     if (!sources || !sources.length) return { error: 'No screen source' };
-    return { base64: sources[0].thumbnail.toJPEG(88).toString('base64') };
+    // Quality 70 (was 88) — cuts payload size further; tile-based token
+    // cost is driven by resolution not JPEG quality, so this mainly saves
+    // upload bandwidth, but every byte helps and text stays legible.
+    return { base64: sources[0].thumbnail.toJPEG(70).toString('base64') };
   } catch (err) {
     return { error: err.message };
   }
 });
 
 // ─────────────────────────────────────────────
-// SCREEN ANALYZER — Groq Vision (llama-3.2-90b)
+// SCREEN ANALYZER — Cerebras Vision (gemma-4-31b)
 // Renderer passes pre-captured base64 image(s) +
 // optional user text. Streams answer back.
-// Same Groq API key as STT — no extra key needed.
+// Image input is only supported on gemma-4-31b, capped at MAX_VISION_IMAGES
+// per request — extra images are silently dropped rather than sent and
+// rejected by the API. Set to 2 (free-trial cap) because Cerebras' server
+// is still live-rejecting requests over 2 images with a 413 ("maximum of
+// 2") on this account despite the $10 top-up — the docs say paid tier
+// should allow 10 (https://inference-docs.cerebras.ai/capabilities/image-inputs),
+// but that only takes effect once Cerebras reclassifies the account's tier
+// on their end, which a code change here cannot force. Bump this back to
+// 10 once Cerebras support confirms the account is off the free-trial
+// bucket. Separate key from Groq (used for STT); set via the same Settings
+// dropdown.
 // ─────────────────────────────────────────────
+const MAX_VISION_IMAGES = 2; // Cerebras is still enforcing the free-trial cap on this account
+
 ipcMain.on('screen-analyze', async (event, { id, images, text }) => {
   const wc = event.sender;
   try {
     if (!images || !images.length) throw new Error('No screenshots provided');
+    if (!CEREBRAS_API_KEY) throw new Error('No Cerebras API key set — add one in Settings');
+    if (images.length > MAX_VISION_IMAGES) images = images.slice(0, MAX_VISION_IMAGES);
 
-    // System message: sets the assistant's role clearly
+    // System message: sets the assistant's role clearly. Appends the same
+    // HUMAN_STYLE guidance the text-chat flow uses (renderer/lib/prompts.js)
+    // so screenshot answers read like a person talking, not a formal AI
+    // writeup — this prompt used to be the odd one out with no such
+    // instruction at all.
     const systemMsg = {
       role: 'system',
       content:
@@ -642,14 +834,16 @@ ipcMain.on('screen-analyze', async (event, { id, images, text }) => {
         'FORMATTING (mandatory for fast reading):\n' +
         '- **bold** every key term, algorithm name, pattern, and critical fact\n' +
         '- **bold** all complexity values like **O(n log n)**\n' +
-        '- Use ```lang code blocks``` for all code\n' 
+        '- Use ```lang code blocks``` for all code\n' +
+        HUMAN_STYLE
     };
 
-    // User message: all images + focused instruction
+    // User message: all images + focused instruction. Cerebras' image_url
+    // has no 'detail' option (that's a Groq/OpenAI-only field).
     const userContent = [
       ...images.map(b64 => ({
         type: 'image_url',
-        image_url: { url: `data:image/jpeg;base64,${b64}`, detail: 'high' }
+        image_url: { url: `data:image/jpeg;base64,${b64}` }
       })),
       {
         type: 'text',
@@ -659,78 +853,47 @@ ipcMain.on('screen-analyze', async (event, { id, images, text }) => {
       }
     ];
 
-    const body = JSON.stringify({
-      model: 'qwen/qwen3.6-27b',
-      messages: [systemMsg, { role: 'user', content: userContent }],
-      max_tokens: 4096,
-      temperature: 0.1,
-      stream: true,
-      reasoning_effort: 'none' 
+    // Same official SDK + AbortController-timeout pattern this app already
+    // used for chat answers (before those moved to the backend WebSocket) —
+    // see getCerebrasClient() above.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 60000);
+    try {
+      const client = getCerebrasClient();
+      const stream = await client.chat.completions.create({
+        model: 'gemma-4-31b',
+        messages: [systemMsg, { role: 'user', content: userContent }],
+        stream: true,
+        max_completion_tokens: 4096,
+        temperature: 0.1,
+      }, { signal: controller.signal });
 
-    });
-
-    await new Promise((resolve, reject) => {
-      const req = https.request({
-        hostname: 'api.groq.com',
-        port: 443,
-        path: '/openai/v1/chat/completions',
-        method: 'POST',
-        headers: {
-          'Authorization': 'Bearer ' + GROQ_API_KEY,
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(body)
+      let totalChars = 0;
+      for await (const chunk of stream) {
+        clearTimeout(timeout);
+        const delta = chunk.choices?.[0]?.delta?.content;
+        if (delta) {
+          totalChars += delta.length;
+          if (!wc.isDestroyed()) wc.send('screen-analyze-chunk', { id, delta });
         }
-      }, res => {
-        console.log('[Vision] HTTP status:', res.statusCode);
-        let buf = '';
-        let totalChars = 0;
-
-        res.on('data', chunk => {
-          buf += chunk.toString();
-          const lines = buf.split('\n');
-          buf = lines.pop();
-          for (const line of lines) {
-            const t = line.trim();
-            if (!t || t === 'data: [DONE]') continue;
-            if (!t.startsWith('data: ')) {
-              // Could be an error body (non-streaming 4xx)
-              if (t.startsWith('{')) console.error('[Vision] API error body:', t.slice(0, 300));
-              continue;
-            }
-            try {
-              const parsed = JSON.parse(t.slice(6));
-              const delta  = parsed.choices?.[0]?.delta?.content;
-              if (delta) {
-                totalChars += delta.length;
-                if (!wc.isDestroyed()) wc.send('screen-analyze-chunk', { id, delta });
-              }
-            } catch (e) {
-              console.error('[Vision] SSE parse error:', e.message, t.slice(0, 80));
-            }
-          }
-        });
-        res.on('end', () => {
-          console.log('[Vision] Done — total chars streamed:', totalChars);
-          if (!wc.isDestroyed()) wc.send('screen-analyze-done', { id });
-          resolve();
-        });
-        res.on('error', reject);
-      });
-      req.on('error', reject);
-      req.write(body);
-      req.end();
-    });
+      }
+      console.log('[Vision] Done — total chars streamed:', totalChars);
+      if (!wc.isDestroyed()) wc.send('screen-analyze-done', { id });
+    } finally {
+      clearTimeout(timeout);
+    }
 
   } catch (err) {
-    console.error('[Vision] Outer error:', err.message);
-    if (!wc.isDestroyed()) wc.send('screen-analyze-error', { id, error: err.message });
+    const msg = err.name === 'AbortError' ? 'Request timed out — try again' : err.message;
+    console.error('[Vision] Outer error:', msg);
+    if (!wc.isDestroyed()) wc.send('screen-analyze-error', { id, error: msg });
   }
 });
 
 // ─────────────────────────────────────────────
 // GROQ WHISPER STT — free tier at console.groq.com
-// WebM → 16 kHz WAV (ffmpeg-static), then POST to
-// api.groq.com/openai/v1/audio/transcriptions
+// WebM → 16 kHz WAV (Web Audio API in the renderer), then POST to
+// api.groq.com/openai/v1/audio/transcriptions using the user's own key.
 // ─────────────────────────────────────────────
 ipcMain.handle('stt-transcribe', async (event, { audioBuffer, mimeType }) => {
   // Renderer converts WebM→WAV using Web Audio API and sends clean WAV bytes.

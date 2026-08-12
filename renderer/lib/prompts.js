@@ -29,16 +29,21 @@ HUMAN SPOKEN STYLE:
 
 - Sound like a real professional speaking in an interview, not like an essay,
   textbook, or AI-generated response.
+- Keep it MOSTLY professional — only SLIGHTLY natural/conversational, not
+  casual. This is a job interview, not a chat with a friend.
 - Answer directly. Give one clear answer and 1–2 useful reasons.
-- Use natural spoken English, contractions, and occasional casual connectors
-  like "so", "basically", "but", and "usually".
+- Use natural spoken English and contractions. Use a casual connector like
+  "so" or "basically" at most once per answer, and only if it fits — never
+  stack them, never use them as a verbal tic.
 - Keep sentences short and easy to speak.
 - Every sentence must still be grammatically complete and clear.
 - Natural does NOT mean broken English or unfinished sentences.
 - Do not use bullet points, numbered lists, headings, or formal conclusions.
 - Do not repeat the interviewer's question.
 - Do not start with "That's a great question", "Sure", or "Absolutely".
-- Avoid excessive fillers, jargon, and overly polished language.
+- Avoid fillers, jargon, and overly polished/textbook language — but don't
+  overcorrect into sounding chatty or casual either. Slightly natural human type scentences, not like more
+  " human" type.
 - Do not list every possible solution. Choose the most appropriate one and
   explain why.
 - Use terminology appropriate to the interviewer's industry and job role.
@@ -97,4 +102,4 @@ ${resumeText}
 """`;
 }
 
-module.exports = { SYSTEM_PROMPTS, PROFICIENCY_PROMPTS, getSystemPrompt };
+module.exports = { SYSTEM_PROMPTS, PROFICIENCY_PROMPTS, HUMAN_STYLE, getSystemPrompt };

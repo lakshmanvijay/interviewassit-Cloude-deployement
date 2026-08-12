@@ -42,6 +42,7 @@ const store = createStore({
   capturingScreenshot: false,
   opacity: 90,
   groqApiKey: '',
+  cerebrasApiKey: '',
   settingsOpen: false,
   account: null,   // { id, name, email, provider, avatar, plan, joinedAt, resume } once received from the web app's login, or null
   resumeText: '',  // extracted resume text, used to ground personal/background questions

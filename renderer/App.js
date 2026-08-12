@@ -75,12 +75,18 @@ function App({ store }) {
 
     let lastRenderAt = 0;
     try {
+      // Explicitly pinned to cerebras — it's the fast provider (500-2000+
+      // tok/s on dedicated hardware vs ~20-80 tok/s for OpenAI/Anthropic).
+      // Relying on the backend's default risks silently falling back to a
+      // much slower provider (this has happened before — see the "No LLM
+      // provider configured" incident). Remove this pin once the backend
+      // default is confirmed fixed, if you'd rather not hardcode it here.
       const reply = await askBackend(question, partial => {
         const now = performance.now();
         if (now - lastRenderAt < 30) return;
         lastRenderAt = now;
         updateMessage(assistantId, { content: partial });
-      });
+      }, 'cerebras');
       updateMessage(assistantId, { content: reply, streaming: false });
       warningRef.current.showWarning('');
     } catch (err) {
@@ -204,13 +210,19 @@ function App({ store }) {
   }
 
   function sendApiKeysToMain() {
-    const { groqApiKey } = store.getState();
-    ipcRenderer.send('set-api-keys', { groqApiKey });
+    const { groqApiKey, cerebrasApiKey } = store.getState();
+    ipcRenderer.send('set-api-keys', { groqApiKey, cerebrasApiKey });
   }
 
   function saveGroqKey(value) {
     store.setState({ groqApiKey: value });
     localStorage.setItem('groq_api_key', value);
+    sendApiKeysToMain();
+  }
+
+  function saveCerebrasKey(value) {
+    store.setState({ cerebrasApiKey: value });
+    localStorage.setItem('cerebras_api_key', value);
     sendApiKeysToMain();
   }
 
@@ -278,7 +290,7 @@ function App({ store }) {
         onToggleSettings=${toggleSettings}
         onQuit=${() => ipcRenderer.send('quit-app')}
       />
-      <${SettingsPanel} store=${store} onSaveGroqKey=${saveGroqKey} onClose=${closeSettings} />
+      <${SettingsPanel} store=${store} onSaveGroqKey=${saveGroqKey} onSaveCerebrasKey=${saveCerebrasKey} onClose=${closeSettings} />
       <${StatusWarning} store=${store} />
       <${UpdateBanner} store=${store} onRestart=${() => ipcRenderer.send('restart-and-install')} />
       <${VoiceBar} store=${store} voiceController=${voiceControllerRef.current} />

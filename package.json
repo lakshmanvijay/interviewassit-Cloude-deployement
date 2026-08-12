@@ -1,6 +1,6 @@
 {
   "name": "stealth-interview-app",
-  "version": "2.0.9",
+  "version": "2.0.11",
   "description": "Screen-hidden AI interview assistant — local Ollama models + continuous voice recognition",
   "main": "main.js",
   "scripts": {
@@ -10,6 +10,7 @@
     "release": "electron-builder --publish always"
   },
   "dependencies": {
+    "@cerebras/cerebras_cloud_sdk": "^1.91.0",
     "electron-log": "^5.4.4",
     "electron-updater": "^6.8.9",
     "ffmpeg-static": "^5.3.0",
