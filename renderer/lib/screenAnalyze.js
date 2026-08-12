@@ -1,8 +1,8 @@
 const { ipcRenderer } = require('electron');
 
-// Streams a Groq Vision answer for one or more screenshots. `onChunk` is
-// called with the accumulated text on each delta; resolves with the final
-// text (or rejects with an Error) when the stream ends.
+// Streams a Cerebras Vision answer for one or more screenshots. `onChunk`
+// is called with the accumulated text on each delta; resolves with the
+// final text (or rejects with an Error) when the stream ends.
 function screenAnalyze(images, text, onChunk) {
   return new Promise((resolve, reject) => {
     const id = 'sa_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
