@@ -5,7 +5,6 @@ const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
-const { HUMAN_STYLE } = require('./renderer/lib/prompts');
 
 // ── CRASH RESILIENCE ───────────────────────────────
 // There's exactly one main process for the whole app — an uncaught
@@ -118,26 +117,9 @@ app.on('open-url', (event, url) => {
   handleAuthCallback(url);
 });
 
-// ── API KEYS ──────────────────────────────────────
-// User-supplied via the renderer's settings dropdown (see 'set-api-keys'
-// below) take priority; env vars are just a fallback for local dev. Used
-// for voice-to-text (Groq Whisper) and screenshot analysis (Cerebras
-// vision) — chat answers still go through our own backend over WebSocket,
-// unaffected by either key.
-let GROQ_API_KEY     = process.env.GROQ_API_KEY || '';
-let CEREBRAS_API_KEY = process.env.CEREBRAS_API_KEY || '';
-
-let cerebrasClient = null;
-function getCerebrasClient() {
-  if (!cerebrasClient) {
-    // Deferred until the first vision request — this SDK alone takes
-    // ~300ms to require(), which used to run unconditionally before the
-    // window even opened. Same convention used for pdf-parse below.
-    const Cerebras = require('@cerebras/cerebras_cloud_sdk');
-    cerebrasClient = new Cerebras({ apiKey: CEREBRAS_API_KEY });
-  }
-  return cerebrasClient;
-}
+// No API keys live in this app anymore — chat, vision, and STT all go
+// through the backend over WebSocket (/ws/interview, /ws/stt), which holds
+// its own server-side provider keys.
 
 let overlayWindow = null;
 let tray = null;
@@ -264,7 +246,7 @@ const RESUME_TEXT_MAX_CHARS = 8000;
 let resumeText = '';
 
 // Plain http/https GET into a Buffer — same raw-request style already used
-// elsewhere in this file (Groq calls, the login API).
+// elsewhere in this file (the login API).
 function fetchBuffer(url) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
@@ -283,11 +265,10 @@ function fetchBuffer(url) {
 async function parseResume(url) {
   try {
     console.log(`[resume] fetching + parsing: ${url}`);
-    // Deferred require — same "only pay the cost when actually needed"
-    // convention used for the Cerebras SDK above. pdf-parse@1.x is a plain
-    // text extractor with no DOM/canvas dependency, unlike 2.x (which wraps
-    // pdf.js and needs browser globals like DOMMatrix that don't exist in
-    // Electron's bundled Node runtime).
+    // Deferred require — only pay the require() cost when actually needed.
+    // pdf-parse@1.x is a plain text extractor with no DOM/canvas dependency,
+    // unlike 2.x (which wraps pdf.js and needs browser globals like
+    // DOMMatrix that don't exist in Electron's bundled Node runtime).
     const pdfParse = require('pdf-parse');
     const buffer = await fetchBuffer(url);
     const result = await pdfParse(buffer);
@@ -682,22 +663,6 @@ ipcMain.on('resize-overlay', (event, { width, height }) => {
   }
 });
 
-// Renderer's settings dropdown pastes in the user's own keys — Groq for
-// voice-to-text, Cerebras for screenshot analysis. Only overwrite on a
-// non-empty value: the renderer fires this once on every launch with
-// whatever's in the store (which starts out as '' until Settings is
-// filled in), and a plain `typeof === 'string'` check let that empty
-// string clobber the env-var fallback below on every single startup.
-ipcMain.on('set-api-keys', (event, { groqApiKey, cerebrasApiKey } = {}) => {
-  if (groqApiKey) {
-    GROQ_API_KEY = groqApiKey;
-  }
-  if (cerebrasApiKey && cerebrasApiKey !== CEREBRAS_API_KEY) {
-    CEREBRAS_API_KEY = cerebrasApiKey;
-    cerebrasClient = null; // force getCerebrasClient() to rebuild with the new key
-  }
-});
-
 
 ipcMain.handle('get-window-position', () => {
   if (overlayWindow) return overlayWindow.getPosition();
@@ -779,7 +744,8 @@ ipcMain.handle('capture-screenshot', async () => {
       // by tiling them (~512px tiles), so this roughly halves the tile
       // count (and token cost) per screenshot while staying sharp enough
       // to read on-screen text/code. Needed headroom for multiple
-      // screenshots in one request without hitting Groq's TPM limit.
+      // screenshots in one request without hitting the backend provider's
+      // token-per-minute limit.
       thumbnailSize: { width: 1280, height: 720 }
     });
     if (!sources || !sources.length) return { error: 'No screen source' };
@@ -792,233 +758,10 @@ ipcMain.handle('capture-screenshot', async () => {
   }
 });
 
-// ─────────────────────────────────────────────
-// SCREEN ANALYZER — Cerebras Vision (gemma-4-31b)
-// Renderer passes pre-captured base64 image(s) +
-// optional user text. Streams answer back.
-// Image input is only supported on gemma-4-31b, capped at MAX_VISION_IMAGES
-// per request — extra images are silently dropped rather than sent and
-// rejected by the API. Set to 2 (free-trial cap) because Cerebras' server
-// is still live-rejecting requests over 2 images with a 413 ("maximum of
-// 2") on this account despite the $10 top-up — the docs say paid tier
-// should allow 10 (https://inference-docs.cerebras.ai/capabilities/image-inputs),
-// but that only takes effect once Cerebras reclassifies the account's tier
-// on their end, which a code change here cannot force. Bump this back to
-// 10 once Cerebras support confirms the account is off the free-trial
-// bucket. Separate key from Groq (used for STT); set via the same Settings
-// dropdown.
-// ─────────────────────────────────────────────
-const MAX_VISION_IMAGES = 2; // Cerebras is still enforcing the free-trial cap on this account
+// Screenshot analysis moved off a direct IPC handler here — the renderer
+// now sends captured screenshots straight to the backend over the same
+// /ws/interview socket used for text chat (see renderer/lib/screenAnalyze.js
+// + interviewSocket.js's askBackend `images` param), so it shares the
+// backend's own provider key instead of needing one configured in this
+// Electron process.
 
-ipcMain.on('screen-analyze', async (event, { id, images, text }) => {
-  const wc = event.sender;
-  try {
-    if (!images || !images.length) throw new Error('No screenshots provided');
-    if (!CEREBRAS_API_KEY) throw new Error('No Cerebras API key set — add one in Settings');
-    if (images.length > MAX_VISION_IMAGES) images = images.slice(0, MAX_VISION_IMAGES);
-
-    // System message: sets the assistant's role clearly. Appends the same
-    // HUMAN_STYLE guidance the text-chat flow uses (renderer/lib/prompts.js)
-    // so screenshot answers read like a person talking, not a formal AI
-    // writeup — this prompt used to be the odd one out with no such
-    // instruction at all.
-    const systemMsg = {
-      role: 'system',
-      content:
-        'You are an expert coding and technical interview assistant. ' +
-        'When given a screenshot your ONLY job is: ' +
-        '(1) Find the exact question, coding problem, or code visible in the image. ' +
-        '(2) Provide a complete, correct answer- Keep explanations short and scannable' +
-        '(3) If the image shows code with bugs, list every bug and give the fixed code. ' +
-        'NEVER describe the screenshot. Just answer the question directly.\n\n' +
-        'FORMATTING (mandatory for fast reading):\n' +
-        '- **bold** every key term, algorithm name, pattern, and critical fact\n' +
-        '- **bold** all complexity values like **O(n log n)**\n' +
-        '- Use ```lang code blocks``` for all code\n' +
-        HUMAN_STYLE
-    };
-
-    // User message: all images + focused instruction. Cerebras' image_url
-    // has no 'detail' option (that's a Groq/OpenAI-only field).
-    const userContent = [
-      ...images.map(b64 => ({
-        type: 'image_url',
-        image_url: { url: `data:image/jpeg;base64,${b64}` }
-      })),
-      {
-        type: 'text',
-        text: text
-          ? `My question: ${text}\n\nAlso solve any coding/interview problem visible in the screenshot above.`
-          : 'Read the question or coding problem shown in the screenshot and give a complete answer with code.'
-      }
-    ];
-
-    // Same official SDK + AbortController-timeout pattern this app already
-    // used for chat answers (before those moved to the backend WebSocket) —
-    // see getCerebrasClient() above.
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 60000);
-    try {
-      const client = getCerebrasClient();
-      const stream = await client.chat.completions.create({
-        model: 'gemma-4-31b',
-        messages: [systemMsg, { role: 'user', content: userContent }],
-        stream: true,
-        max_completion_tokens: 4096,
-        temperature: 0.1,
-      }, { signal: controller.signal });
-
-      let totalChars = 0;
-      for await (const chunk of stream) {
-        clearTimeout(timeout);
-        const delta = chunk.choices?.[0]?.delta?.content;
-        if (delta) {
-          totalChars += delta.length;
-          if (!wc.isDestroyed()) wc.send('screen-analyze-chunk', { id, delta });
-        }
-      }
-      console.log('[Vision] Done — total chars streamed:', totalChars);
-      if (!wc.isDestroyed()) wc.send('screen-analyze-done', { id });
-    } finally {
-      clearTimeout(timeout);
-    }
-
-  } catch (err) {
-    const msg = err.name === 'AbortError' ? 'Request timed out — try again' : err.message;
-    console.error('[Vision] Outer error:', msg);
-    if (!wc.isDestroyed()) wc.send('screen-analyze-error', { id, error: msg });
-  }
-});
-
-// ─────────────────────────────────────────────
-// GROQ WHISPER STT — free tier at console.groq.com
-// WebM → 16 kHz WAV (Web Audio API in the renderer), then POST to
-// api.groq.com/openai/v1/audio/transcriptions using the user's own key.
-// ─────────────────────────────────────────────
-ipcMain.handle('stt-transcribe', async (event, { audioBuffer, mimeType }) => {
-  // Renderer converts WebM→WAV using Web Audio API and sends clean WAV bytes.
-  try {
-    if (!audioBuffer || !audioBuffer.length) throw new Error('No audio');
-
-    const buf      = Buffer.from(audioBuffer);
-    const tag      = Date.now();
-    const mime     = mimeType || 'audio/wav';
-    const ext      = mime.includes('wav') ? 'wav' : mime.includes('mp3') ? 'mp3' : 'webm';
-    console.log('[STT] Sending', buf.length, 'bytes (', mime, ') to Groq Whisper');
-
-    const boundary = 'GBoundary' + tag.toString(16);
-    const CRLF = '\r\n';
-    const body = Buffer.concat([
-      Buffer.from(`--${boundary}${CRLF}Content-Disposition: form-data; name="model"${CRLF}${CRLF}whisper-large-v3-turbo${CRLF}`),
-      Buffer.from(`--${boundary}${CRLF}Content-Disposition: form-data; name="response_format"${CRLF}${CRLF}json${CRLF}`),
-      Buffer.from(`--${boundary}${CRLF}Content-Disposition: form-data; name="language"${CRLF}${CRLF}en${CRLF}`),
-      Buffer.from(`--${boundary}${CRLF}Content-Disposition: form-data; name="file"; filename="audio.${ext}"${CRLF}Content-Type: ${mime}${CRLF}${CRLF}`),
-      buf,
-      Buffer.from(`${CRLF}--${boundary}--${CRLF}`)
-    ]);
-
-    return await new Promise((resolve) => {
-      const req = https.request({
-        hostname: 'api.groq.com',
-        port: 443,
-        path: '/openai/v1/audio/transcriptions',
-        method: 'POST',
-        headers: {
-          'Authorization': 'Bearer ' + GROQ_API_KEY,
-          'Content-Type': `multipart/form-data; boundary=${boundary}`,
-          'Content-Length': body.length
-        }
-      }, res => {
-        let data = '';
-        res.on('data', c => (data += c));
-        res.on('end', () => {
-          console.log('[STT] Groq response', res.statusCode, ':', data.slice(0, 200));
-          try {
-            if (res.statusCode !== 200) {
-              resolve({ error: `Groq ${res.statusCode}: ${data.slice(0, 300)}` });
-            } else {
-              resolve({ text: JSON.parse(data).text || '' });
-            }
-          } catch (e) {
-            resolve({ error: 'Bad JSON from Groq: ' + data.slice(0, 100) });
-          }
-        });
-      });
-      req.on('error', e => resolve({ error: e.message }));
-      req.write(body);
-      req.end();
-    });
-  } catch (err) {
-    return { error: err.message };
-  }
-});
-
-// ─────────────────────────────────────────────
-// NVIDIA PARAKEET STT (kept for reference)
-// ─────────────────────────────────────────────
-ipcMain.handle('parakeet-transcribe', async (event, { audioBuffer }) => {
-  try {
-    if (!audioBuffer || !audioBuffer.length) throw new Error('No audio');
-
-    const tmpDir = os.tmpdir();
-    const tag = Date.now();
-    const webmPath = path.join(tmpDir, `stt_${tag}.webm`);
-    const wavPath  = path.join(tmpDir, `stt_${tag}.wav`);
-
-    await writeFile(webmPath, Buffer.from(audioBuffer));
-
-    // Convert to 16 kHz mono WAV (Parakeet works best at 16 kHz)
-    await new Promise((res, rej) => {
-      const ff = spawn(ffmpegPath, ['-y', '-i', webmPath, '-ar', '16000', '-ac', '1', '-f', 'wav', wavPath]);
-      ff.on('close', code => code === 0 ? res() : rej(new Error('ffmpeg conversion failed')));
-      ff.on('error', rej);
-    });
-
-    const wavData = fs.readFileSync(wavPath);
-    try { fs.unlinkSync(webmPath); } catch (e) {}
-    try { fs.unlinkSync(wavPath);  } catch (e) {}
-
-    // Build multipart/form-data body
-    const boundary = 'PBoundary' + tag.toString(16);
-    const CRLF = '\r\n';
-    const body = Buffer.concat([
-      Buffer.from(`--${boundary}${CRLF}Content-Disposition: form-data; name="model"${CRLF}${CRLF}nvidia/parakeet-ctc-1.1b-asr${CRLF}`),
-      Buffer.from(`--${boundary}${CRLF}Content-Disposition: form-data; name="file"; filename="audio.wav"${CRLF}Content-Type: audio/wav${CRLF}${CRLF}`),
-      wavData,
-      Buffer.from(`${CRLF}--${boundary}--${CRLF}`)
-    ]);
-
-    return await new Promise((resolve) => {
-      const req = https.request({
-        hostname: 'integrate.api.nvidia.com',
-        port: 443,
-        path: '/v1/audio/transcriptions',
-        method: 'POST',
-        headers: {
-          'Authorization': 'Bearer ' + GROQ_API_KEY,
-          'Content-Type': `multipart/form-data; boundary=${boundary}`,
-          'Content-Length': body.length
-        }
-      }, res => {
-        let data = '';
-        res.on('data', c => (data += c));
-        res.on('end', () => {
-          try {
-            if (res.statusCode !== 200) {
-              resolve({ error: `Parakeet ${res.statusCode}: ${data.slice(0, 200)}` });
-            } else {
-              resolve({ text: JSON.parse(data).text || '' });
-            }
-          } catch (e) {
-            resolve({ error: 'Bad response from Parakeet API' });
-          }
-        });
-      });
-      req.on('error', e => resolve({ error: e.message }));
-      req.write(body);
-      req.end();
-    });
-  } catch (err) {
-    return { error: err.message };
-  }
-});

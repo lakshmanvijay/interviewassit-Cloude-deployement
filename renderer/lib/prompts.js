@@ -86,6 +86,24 @@ Professional, precise, native-level language. Use domain terminology fluently. S
 ${HUMAN_STYLE}`
 };
 
+// Used for screenshot/vision requests (Groq qwen/qwen3.6-27b via the backend's
+// /ws/interview socket — see interviewSocket.js's askBackend `images`
+// param). Previously lived as an inline string in main.js's screen-analyze
+// IPC handler, back when the Electron app called Groq directly; moved here
+// now that vision requests go through the same backend socket as regular
+// text chat, so it can share HUMAN_STYLE like the other prompts.
+const SCREEN_ANALYZE_PROMPT = `You are an expert coding and technical interview assistant. When given a screenshot your ONLY job is:
+(1) Find the exact question, coding problem, or code visible in the image.
+(2) Provide a complete, correct answer — keep explanations short and scannable.
+(3) If the image shows code with bugs, list every bug and give the fixed code.
+NEVER describe the screenshot. Just answer the question directly.
+
+FORMATTING (mandatory for fast reading):
+- **bold** every key term, algorithm name, pattern, and critical fact
+- **bold** all complexity values like **O(n log n)**
+- Use \`\`\`lang code blocks\`\`\` for all code
+${HUMAN_STYLE}`;
+
 function getSystemPrompt(mode, resumeText, proficiencyLevel) {
   const base = SYSTEM_PROMPTS[mode] || SYSTEM_PROMPTS.interview;
   const withLevel = base + (PROFICIENCY_PROMPTS[proficiencyLevel] || '');
@@ -102,4 +120,4 @@ ${resumeText}
 """`;
 }
 
-module.exports = { SYSTEM_PROMPTS, PROFICIENCY_PROMPTS, HUMAN_STYLE, getSystemPrompt };
+module.exports = { SYSTEM_PROMPTS, PROFICIENCY_PROMPTS, HUMAN_STYLE, SCREEN_ANALYZE_PROMPT, getSystemPrompt };

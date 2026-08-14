@@ -3,15 +3,12 @@ const { html } = require('../html');
 const { useStoreSlice } = require('../hooks');
 
 // Dropdown panel (toggled from the account avatar button in TitleBar) —
-// shows the signed-in user's details/resume/logout, plus the user's own
-// Groq API key (voice-to-text) and Cerebras API key (screenshot analysis).
-// AI answers stream through our own backend, which holds its own
-// server-side key.
-function SettingsPanel({ store, onSaveGroqKey, onSaveCerebrasKey, onClose }) {
+// shows the signed-in user's details/resume/logout, plus the answer
+// language-level setting. No API key inputs — Cerebras/Deepgram keys live
+// server-side on the backend now, reached over WebSocket.
+function SettingsPanel({ store, onClose }) {
   const open          = useStoreSlice(store, s => s.settingsOpen);
   const collapsed      = useStoreSlice(store, s => s.collapsed);
-  const groqApiKey     = useStoreSlice(store, s => s.groqApiKey);
-  const cerebrasApiKey = useStoreSlice(store, s => s.cerebrasApiKey);
   const account        = useStoreSlice(store, s => s.account);
   const proficiencyLevel = useStoreSlice(store, s => s.proficiencyLevel);
 
@@ -34,26 +31,6 @@ function SettingsPanel({ store, onSaveGroqKey, onSaveCerebrasKey, onClose }) {
           <button class="settings-ok-btn" onClick=${() => ipcRenderer.send('start-login')}>Login</button>
         `}
       </div>
-      <div class="settings-row">
-        <label for="groq-key-input">Groq API Key</label>
-        <input
-          id="groq-key-input" type="password" spellcheck="false" autocomplete="off"
-          placeholder="gsk_…"
-          value=${groqApiKey}
-          onInput=${e => onSaveGroqKey(e.currentTarget.value.trim())}
-        />
-      </div>
-      <div class="settings-hint">Used for voice-to-text. Stored locally on this device only.</div>
-      <div class="settings-row">
-        <label for="cerebras-key-input">Cerebras API Key</label>
-        <input
-          id="cerebras-key-input" type="password" spellcheck="false" autocomplete="off"
-          placeholder="csk-…"
-          value=${cerebrasApiKey}
-          onInput=${e => onSaveCerebrasKey(e.currentTarget.value.trim())}
-        />
-      </div>
-      <div class="settings-hint">Used for screenshot analysis. Stored locally on this device only.</div>
       <div class="settings-row">
         <label for="proficiency-select">Answer Language Level</label>
         <select

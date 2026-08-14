@@ -8,6 +8,7 @@ const { ipcRenderer } = require('electron');
 
 const PING_INTERVAL_MS = 25000;
 const REQUEST_TIMEOUT_MS = 45000;
+const VISION_REQUEST_TIMEOUT_MS = 60000; // matches the old direct-Cerebras AbortController timeout in main.js
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 
@@ -125,23 +126,31 @@ function disconnect() {
 // Returns a Promise<string> resolving with the full accumulated answer,
 // calling onDelta(accumulatedTextSoFar) as chunks arrive — same shape as
 // the old cerebrasChat() so App.js barely changes.
-async function askBackend(question, onDelta, provider) {
+//
+// `images` (optional array of base64 JPEG strings, no data-URL prefix) is
+// for screenshot/vision requests — the backend routes these to gemma-4-31b
+// instead of the regular text model. Vision requests can take longer than
+// a plain question (multiple images to tile/tokenize), hence the longer
+// timeout when images are present.
+async function askBackend(question, onDelta, provider, images) {
   await connect();
   if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error('Not connected');
 
   const id = 'q_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+  const timeoutMs = images && images.length ? VISION_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
 
   return new Promise((resolve, reject) => {
     const timeoutTimer = setTimeout(() => {
       pending.delete(id);
       ws.send(JSON.stringify({ type: 'cancel', id }));
       reject(new Error('The model is taking longer than expected. The service may be busy — please wait a moment and try again.'));
-    }, REQUEST_TIMEOUT_MS);
+    }, timeoutMs);
 
     pending.set(id, { resolve, reject, onDelta, acc: '', timeoutTimer });
 
     const payload = { type: 'question', id, question };
     if (provider) payload.provider = provider;
+    if (images && images.length) payload.images = images;
     ws.send(JSON.stringify(payload));
   });
 }

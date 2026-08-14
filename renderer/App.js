@@ -209,28 +209,7 @@ function App({ store }) {
     store.setState({ settingsOpen: false });
   }
 
-  function sendApiKeysToMain() {
-    const { groqApiKey, cerebrasApiKey } = store.getState();
-    ipcRenderer.send('set-api-keys', { groqApiKey, cerebrasApiKey });
-  }
-
-  function saveGroqKey(value) {
-    store.setState({ groqApiKey: value });
-    localStorage.setItem('groq_api_key', value);
-    sendApiKeysToMain();
-  }
-
-  function saveCerebrasKey(value) {
-    store.setState({ cerebrasApiKey: value });
-    localStorage.setItem('cerebras_api_key', value);
-    sendApiKeysToMain();
-  }
-
   useEffect(() => {
-    // Push whatever was already saved (from localStorage, via index.js)
-    // to the main process once at startup — it starts out with no keys.
-    sendApiKeysToMain();
-
     // Apply the store's initial opacity to the background CSS var — nothing
     // did this before the slider was first touched.
     setOpacity(store.getState().opacity);
@@ -290,7 +269,7 @@ function App({ store }) {
         onToggleSettings=${toggleSettings}
         onQuit=${() => ipcRenderer.send('quit-app')}
       />
-      <${SettingsPanel} store=${store} onSaveGroqKey=${saveGroqKey} onSaveCerebrasKey=${saveCerebrasKey} onClose=${closeSettings} />
+      <${SettingsPanel} store=${store} onClose=${closeSettings} />
       <${StatusWarning} store=${store} />
       <${UpdateBanner} store=${store} onRestart=${() => ipcRenderer.send('restart-and-install')} />
       <${VoiceBar} store=${store} voiceController=${voiceControllerRef.current} />
