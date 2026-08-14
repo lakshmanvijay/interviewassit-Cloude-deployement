@@ -1,33 +1,31 @@
-const { ipcRenderer } = require('electron');
+const { askBackend } = require('./interviewSocket');
+const { SCREEN_ANALYZE_PROMPT } = require('./prompts');
 
-// Streams a Groq Vision answer for one or more screenshots. `onChunk` is
-// called with the accumulated text on each delta; resolves with the final
-// text (or rejects with an Error) when the stream ends.
+// Matches the pendingScreenshots cap from the old direct-Groq prototype.
+// The backend gives the first image detail:"high" and the rest detail:"low"
+// (OpenAI-compatible vision param) to keep token usage/latency down on the
+// extras, same trick the prototype used client-side.
+const MAX_VISION_IMAGES = 4;
+
+// Streams a screenshot-vision answer from the same backend WebSocket used
+// for regular text chat — see interviewSocket.js's askBackend `images`
+// param. The backend routes any request carrying images to a vision-capable
+// provider regardless of the `provider` passed here: currently Groq's
+// qwen/qwen3.6-27b (matching the old direct-Groq prototype), with Cerebras'
+// gemma-4-31b and Anthropic/Claude wired up as automatic fallbacks if Groq
+// fails before producing output (Anthropic sits dormant until that API key
+// is added). `onChunk` is called with the accumulated text on each delta;
+// resolves with the final text (or rejects with an Error) when the stream ends.
 function screenAnalyze(images, text, onChunk) {
-  return new Promise((resolve, reject) => {
-    const id = 'sa_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
-    let accumulated = '';
+  const capped = images.length > MAX_VISION_IMAGES ? images.slice(0, MAX_VISION_IMAGES) : images;
 
-    const onDelta = (_, p) => {
-      if (p.id !== id) return;
-      accumulated += p.delta;
-      onChunk(accumulated);
-    };
-    const onDone = (_, p) => { if (p.id !== id) return; cleanup(); resolve(accumulated); };
-    const onError = (_, p) => { if (p.id !== id) return; cleanup(); reject(new Error(p.error)); };
+  const question = `${SCREEN_ANALYZE_PROMPT}\n\n${
+    text
+      ? `My question: ${text}\n\nAlso solve any coding/interview problem visible in the screenshot(s) above.`
+      : 'Read the question or coding problem shown in the screenshot(s) and give a complete answer with code.'
+  }`;
 
-    function cleanup() {
-      ipcRenderer.removeListener('screen-analyze-chunk', onDelta);
-      ipcRenderer.removeListener('screen-analyze-done',  onDone);
-      ipcRenderer.removeListener('screen-analyze-error', onError);
-    }
-
-    ipcRenderer.on('screen-analyze-chunk', onDelta);
-    ipcRenderer.on('screen-analyze-done',  onDone);
-    ipcRenderer.on('screen-analyze-error', onError);
-
-    ipcRenderer.send('screen-analyze', { id, images, text });
-  });
+  return askBackend(question, onChunk, 'groq', capped);
 }
 
 module.exports = { screenAnalyze };
