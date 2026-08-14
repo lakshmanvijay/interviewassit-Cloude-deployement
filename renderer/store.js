@@ -44,6 +44,7 @@ const store = createStore({
   settingsOpen: false,
   account: null,   // { id, name, email, provider, avatar, plan, joinedAt, resume } once received from the web app's login, or null
   resumeText: '',  // extracted resume text, used to ground personal/background questions
+  interviewSettings: null,  // { role, proficiency, mode } from GET /api/interview-settings/me — used to calibrate every answer, see lib/prompts.js
   updateReady: false,  // true once a downloaded update is waiting to install
   updateVersion: '',
 });

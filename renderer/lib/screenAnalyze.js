@@ -1,5 +1,5 @@
 const { askBackend } = require('./interviewSocket');
-const { SCREEN_ANALYZE_PROMPT } = require('./prompts');
+const { getScreenAnalyzePrompt } = require('./prompts');
 
 // Matches the pendingScreenshots cap from the old direct-Groq prototype.
 // The backend gives the first image detail:"high" and the rest detail:"low"
@@ -16,10 +16,10 @@ const MAX_VISION_IMAGES = 4;
 // fails before producing output (Anthropic sits dormant until that API key
 // is added). `onChunk` is called with the accumulated text on each delta;
 // resolves with the final text (or rejects with an Error) when the stream ends.
-function screenAnalyze(images, text, onChunk) {
+function screenAnalyze(images, text, resumeText, candidateProfile, onChunk) {
   const capped = images.length > MAX_VISION_IMAGES ? images.slice(0, MAX_VISION_IMAGES) : images;
 
-  const question = `${SCREEN_ANALYZE_PROMPT}\n\n${
+  const question = `${getScreenAnalyzePrompt(resumeText, candidateProfile)}\n\n${
     text
       ? `My question: ${text}\n\nAlso solve any coding/interview problem visible in the screenshot(s) above.`
       : 'Read the question or coding problem shown in the screenshot(s) and give a complete answer with code.'

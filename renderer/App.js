@@ -63,8 +63,8 @@ function App({ store }) {
     store.setState(s => ({ conversation: [...s.conversation, { id: userId, role: 'user', content: text }] }));
     scrollQuestionIntoTop(userId);
 
-    const { mode, resumeText, proficiencyLevel } = store.getState();
-    const systemPrompt = getSystemPrompt(mode, resumeText, proficiencyLevel);
+    const { mode, resumeText, proficiencyLevel, interviewSettings } = store.getState();
+    const systemPrompt = getSystemPrompt(mode, resumeText, proficiencyLevel, interviewSettings);
     const historyText = priorHistory.length
       ? '\n\nRECENT CONVERSATION:\n' + priorHistory.map(m => `${m.role === 'user' ? 'Q' : 'A'}: ${m.content}`).join('\n')
       : '';
@@ -130,7 +130,8 @@ function App({ store }) {
     store.setState({ sendDisabled: true });
     let lastRenderAt = 0;
     try {
-      const reply = await screenAnalyze(images, text, partial => {
+      const { resumeText, interviewSettings } = store.getState();
+      const reply = await screenAnalyze(images, text, resumeText, interviewSettings, partial => {
         const now = performance.now();
         if (now - lastRenderAt < 30) return;
         lastRenderAt = now;
@@ -237,7 +238,8 @@ function App({ store }) {
       'jump-to-last-question':  () => questionNavRef.current.jumpToQuestion(Infinity),
       'account-received':       (_, account) => { store.setState({ account }); connectInterviewSocket().catch(() => {}); },
       'resume-parsed':          (_, text) => store.setState({ resumeText: text }),
-      'logged-out':             () => { store.setState({ account: null, resumeText: '' }); disconnectInterviewSocket(); },
+      'interview-settings-received': (_, settings) => store.setState({ interviewSettings: settings }),
+      'logged-out':             () => { store.setState({ account: null, resumeText: '', interviewSettings: null }); disconnectInterviewSocket(); },
       'update-ready':           (_, { version }) => store.setState({ updateReady: true, updateVersion: version }),
     };
     Object.entries(listeners).forEach(([ch, fn]) => ipcRenderer.on(ch, fn));
