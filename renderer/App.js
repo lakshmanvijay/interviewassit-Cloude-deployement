@@ -3,7 +3,7 @@ const { html } = require('./html');
 const { useRef, useEffect } = require('preact/hooks');
 
 const { getSystemPrompt } = require('./lib/prompts');
-const { cerebrasChat } = require('./lib/cerebras');
+const { connect: connectInterviewSocket, disconnect: disconnectInterviewSocket, askBackend } = require('./lib/interviewSocket');
 const { screenAnalyze } = require('./lib/screenAnalyze');
 const { createVoiceController } = require('./lib/voice');
 const { createWarningController } = require('./lib/warning');
@@ -53,27 +53,40 @@ function App({ store }) {
     text = (text || '').trim();
     if (!text) return;
 
+    // Captured *before* the new user message is appended below, so it holds
+    // prior turns only — the backend's WS API takes one flat `question`
+    // string (no separate messages array), so recent history gets folded
+    // into that string instead of duplicating the question we're about to ask.
+    const priorHistory = store.getState().conversation.slice(-2).map(m => ({ role: m.role, content: m.content }));
+
     const userId = genId();
     store.setState(s => ({ conversation: [...s.conversation, { id: userId, role: 'user', content: text }] }));
     scrollQuestionIntoTop(userId);
 
-    // History is captured *before* the assistant placeholder is appended,
-    // so it never includes the in-flight streaming answer.
-    const history = store.getState().conversation.slice(-2).map(m => ({ role: m.role, content: m.content }));
-    const { mode, model, resumeText, proficiencyLevel } = store.getState();
-    const messages = [{ role: 'system', content: getSystemPrompt(mode, resumeText, proficiencyLevel) }, ...history];
+    const { mode, resumeText, proficiencyLevel } = store.getState();
+    const systemPrompt = getSystemPrompt(mode, resumeText, proficiencyLevel);
+    const historyText = priorHistory.length
+      ? '\n\nRECENT CONVERSATION:\n' + priorHistory.map(m => `${m.role === 'user' ? 'Q' : 'A'}: ${m.content}`).join('\n')
+      : '';
+    const question = `${systemPrompt}${historyText}\n\nNEW QUESTION:\n${text}`;
 
     const assistantId = genId();
     store.setState(s => ({ conversation: [...s.conversation, { id: assistantId, role: 'assistant', content: '', streaming: true }] }));
 
     let lastRenderAt = 0;
     try {
-      const reply = await cerebrasChat(messages, model, partial => {
+      // Explicitly pinned to cerebras — it's the fast provider (500-2000+
+      // tok/s on dedicated hardware vs ~20-80 tok/s for OpenAI/Anthropic).
+      // Relying on the backend's default risks silently falling back to a
+      // much slower provider (this has happened before — see the "No LLM
+      // provider configured" incident). Remove this pin once the backend
+      // default is confirmed fixed, if you'd rather not hardcode it here.
+      const reply = await askBackend(question, partial => {
         const now = performance.now();
         if (now - lastRenderAt < 30) return;
         lastRenderAt = now;
         updateMessage(assistantId, { content: partial });
-      });
+      }, 'cerebras');
       updateMessage(assistantId, { content: reply, streaming: false });
       warningRef.current.showWarning('');
     } catch (err) {
@@ -196,28 +209,7 @@ function App({ store }) {
     store.setState({ settingsOpen: false });
   }
 
-  function sendApiKeysToMain() {
-    const { cerebrasApiKey, groqApiKey } = store.getState();
-    ipcRenderer.send('set-api-keys', { cerebrasApiKey, groqApiKey });
-  }
-
-  function saveCerebrasKey(value) {
-    store.setState({ cerebrasApiKey: value });
-    localStorage.setItem('cerebras_api_key', value);
-    sendApiKeysToMain();
-  }
-
-  function saveGroqKey(value) {
-    store.setState({ groqApiKey: value });
-    localStorage.setItem('groq_api_key', value);
-    sendApiKeysToMain();
-  }
-
   useEffect(() => {
-    // Push whatever was already saved (from localStorage, via index.js)
-    // to the main process once at startup — it starts out with no keys.
-    sendApiKeysToMain();
-
     // Apply the store's initial opacity to the background CSS var — nothing
     // did this before the slider was first touched.
     setOpacity(store.getState().opacity);
@@ -243,9 +235,9 @@ function App({ store }) {
       'nav-next-question':      () => questionNavRef.current.navigateQuestion(+1),
       'jump-to-first-question': () => questionNavRef.current.jumpToQuestion(0),
       'jump-to-last-question':  () => questionNavRef.current.jumpToQuestion(Infinity),
-      'account-received':       (_, account) => store.setState({ account }),
+      'account-received':       (_, account) => { store.setState({ account }); connectInterviewSocket().catch(() => {}); },
       'resume-parsed':          (_, text) => store.setState({ resumeText: text }),
-      'logged-out':             () => store.setState({ account: null, resumeText: '' }),
+      'logged-out':             () => { store.setState({ account: null, resumeText: '' }); disconnectInterviewSocket(); },
       'update-ready':           (_, { version }) => store.setState({ updateReady: true, updateVersion: version }),
     };
     Object.entries(listeners).forEach(([ch, fn]) => ipcRenderer.on(ch, fn));
@@ -277,7 +269,7 @@ function App({ store }) {
         onToggleSettings=${toggleSettings}
         onQuit=${() => ipcRenderer.send('quit-app')}
       />
-      <${SettingsPanel} store=${store} onSaveCerebrasKey=${saveCerebrasKey} onSaveGroqKey=${saveGroqKey} onClose=${closeSettings} />
+      <${SettingsPanel} store=${store} onClose=${closeSettings} />
       <${StatusWarning} store=${store} />
       <${UpdateBanner} store=${store} onRestart=${() => ipcRenderer.send('restart-and-install')} />
       <${VoiceBar} store=${store} voiceController=${voiceControllerRef.current} />
