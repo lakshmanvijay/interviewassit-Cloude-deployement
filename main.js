@@ -245,6 +245,14 @@ loadRemoteConfig();
 const RESUME_TEXT_MAX_CHARS = 8000;
 let resumeText = '';
 
+// Interview settings ({ role, proficiency, mode }) fetched from
+// GET /api/interview-settings/me — configured on the web app, e.g.
+// { role: "Backend Developer", proficiency: "Intermediate", mode: "Candidate" }.
+// Used alongside resumeText to calibrate every AI answer, see prompts.js's
+// getResumeRoleContext. Same host as LOGIN_API_URL; fetch failures just
+// leave this null rather than breaking login.
+let interviewSettings = null;
+
 // Plain http/https GET into a Buffer — same raw-request style already used
 // elsewhere in this file (the login API).
 function fetchBuffer(url) {
@@ -262,6 +270,44 @@ function fetchBuffer(url) {
   });
 }
 
+// GET with a Bearer auth header, same request style as fetchBuffer/fetchJson
+// above — used for /api/interview-settings/me, which (unlike the login/resume
+// endpoints) requires the session token as Authorization rather than a body.
+function fetchJsonAuth(url, token, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const lib = parsed.protocol === 'https:' ? https : http;
+    const req = lib.get(parsed, { headers: { Authorization: `Bearer ${token}` } }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        const body = Buffer.concat(chunks).toString('utf8');
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          // Body included so a 404 shows *which* URL/route is missing rather
+          // than just a bare status code — this endpoint often 404s simply
+          // because the local/dev backend doesn't have it wired up yet.
+          return reject(new Error(`Interview settings fetch (${url}) returned ${res.statusCode}: ${body.slice(0, 300)}`));
+        }
+        try {
+          resolve(JSON.parse(body));
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+    req.on('error', reject);
+    if (timeoutMs) req.setTimeout(timeoutMs, () => req.destroy(new Error('Interview settings fetch timed out')));
+  });
+}
+
+// Derives from the same (possibly remote-config-overridden) host as
+// LOGIN_API_URL, same reasoning as get-ws-url below — never drifts out of
+// sync with it. Response shape: { role, proficiency, mode }.
+function fetchInterviewSettings(token) {
+  const api = new URL(LOGIN_API_URL);
+  return fetchJsonAuth(`${api.protocol}//${api.host}/api/interview-settings/me`, token, 8000);
+}
+
 async function parseResume(url) {
   try {
     console.log(`[resume] fetching + parsing: ${url}`);
@@ -271,6 +317,20 @@ async function parseResume(url) {
     // DOMMatrix that don't exist in Electron's bundled Node runtime).
     const pdfParse = require('pdf-parse');
     const buffer = await fetchBuffer(url);
+
+    // pdf-parse throws an opaque "Invalid PDF structure" with no context when
+    // the response isn't actually a PDF (e.g. the endpoint returned a JSON
+    // error body or an HTML page with a 200 status instead of the file bytes)
+    // — check the magic bytes ourselves first so we can log what we actually
+    // got instead of just a useless parse error.
+    if (buffer.slice(0, 4).toString('latin1') !== '%PDF') {
+      console.error(
+        `[resume] response from ${url} is not a PDF (${buffer.length} bytes). ` +
+        `First 500 bytes:\n${buffer.slice(0, 500).toString('utf8')}`
+      );
+      return '';
+    }
+
     const result = await pdfParse(buffer);
     const text = (result.text || '').slice(0, RESUME_TEXT_MAX_CHARS);
     console.log(`[resume] extracted ${text.length} chars:\n${text}`);
@@ -361,6 +421,7 @@ let pendingAccount = null;
 function notifyAccountRenderer() {
   if (pendingAccount) sendToOverlay('account-received', pendingAccount);
   if (resumeText) sendToOverlay('resume-parsed', resumeText);
+  if (interviewSettings) sendToOverlay('interview-settings-received', interviewSettings);
 }
 
 // Shared by both the deep-link login flow and the startup session-restore
@@ -382,6 +443,13 @@ function activateSession(token) {
           if (text) sendToOverlay('resume-parsed', text);
         });
       }
+
+      fetchInterviewSettings(token)
+        .then(settings => {
+          interviewSettings = (settings && (settings.role || settings.proficiency || settings.mode)) ? settings : null;
+          if (interviewSettings) sendToOverlay('interview-settings-received', interviewSettings);
+        })
+        .catch(e => console.error('[interview-settings] fetch failed:', e.message));
     })
     .catch(e => {
       console.error('[login] failed to fetch account from API:', e.message);
@@ -685,6 +753,7 @@ ipcMain.on('logout', () => {
   sessionToken = null;
   pendingAccount = null;
   resumeText = '';
+  interviewSettings = null;
   clearSessionToken();
   sendToOverlay('logged-out');
 });

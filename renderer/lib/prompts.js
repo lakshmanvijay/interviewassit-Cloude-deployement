@@ -86,13 +86,56 @@ Professional, precise, native-level language. Use domain terminology fluently. S
 ${HUMAN_STYLE}`
 };
 
+// Shared by both getSystemPrompt() and getScreenAnalyzePrompt() so text
+// questions and screenshot/vision questions compare every answer against the
+// same candidate profile + resume, not just "background" questions.
+// `candidateProfile` ({ role, proficiency, mode }) comes from the backend's
+// GET /api/interview-settings/me (main.js fetches it at login and forwards
+// it over IPC as 'interview-settings-received' — see App.js/store.js).
+// Returns '' when there's nothing to add, so callers can always append it
+// unconditionally.
+function getResumeRoleContext(resumeText, candidateProfile) {
+  const { role, proficiency, mode } = candidateProfile || {};
+  if (!resumeText && !role && !proficiency && !mode) return '';
+
+  const profileLines = [
+    role ? `- Target role: ${role}` : '',
+    proficiency ? `- Proficiency level: ${proficiency}` : '',
+    mode ? `- Mode: ${mode}` : ''
+  ].filter(Boolean).join('\n');
+
+  const profileBlock = profileLines ? `
+CANDIDATE PROFILE:
+${profileLines}
+- Tailor every answer's depth, seniority, and terminology to this role and proficiency level — don't default to a generic answer.` : '';
+
+  const resumeBlock = resumeText ? `
+
+RESUME SUMMARY:
+"""
+${resumeText}
+"""
+- For EVERY question — technical, coding, behavioral, or personal — check whether something in this resume applies (a real project, technology, or piece of experience) and weave that in naturally instead of a generic textbook answer.
+- Only reference experience, projects, or skills that are actually present in the resume — never invent any.
+- If the question is about the candidate directly (background, work history, education, skills, prior projects), answer straight from this resume.
+- For simple personal-identity questions (e.g. "what's your name?", "tell me about yourself", "where are you from?"), look up the actual detail in the resume (e.g. the candidate's real name) and answer directly and confidently — never deflect, never say "I don't have a name" or "as an AI", never give a placeholder/generic answer.
+- If the resume doesn't cover something relevant to the question, still answer it correctly, but explicitly flag that the answer isn't resume-backed.` : '';
+
+  return `
+
+CANDIDATE CONTEXT — apply this to every single answer, not just background questions:${profileBlock}${resumeBlock}
+
+Answer in first person, as if you are the candidate speaking out loud in the interview.`;
+}
+
 // Used for screenshot/vision requests (Groq qwen/qwen3.6-27b via the backend's
 // /ws/interview socket — see interviewSocket.js's askBackend `images`
 // param). Previously lived as an inline string in main.js's screen-analyze
 // IPC handler, back when the Electron app called Groq directly; moved here
 // now that vision requests go through the same backend socket as regular
 // text chat, so it can share HUMAN_STYLE like the other prompts.
-const SCREEN_ANALYZE_PROMPT = `You are an expert coding and technical interview assistant. When given a screenshot your ONLY job is:
+function getScreenAnalyzePrompt(resumeText, candidateProfile) {
+  return `You are an expert coding and technical interview assistant. When given a screenshot your ONLY job is:
 (1) Find the exact question, coding problem, or code visible in the image.
 (2) Provide a complete, correct answer — keep explanations short and scannable.
 (3) If the image shows code with bugs, list every bug and give the fixed code.
@@ -102,22 +145,12 @@ FORMATTING (mandatory for fast reading):
 - **bold** every key term, algorithm name, pattern, and critical fact
 - **bold** all complexity values like **O(n log n)**
 - Use \`\`\`lang code blocks\`\`\` for all code
-${HUMAN_STYLE}`;
-
-function getSystemPrompt(mode, resumeText, proficiencyLevel) {
-  const base = SYSTEM_PROMPTS[mode] || SYSTEM_PROMPTS.interview;
-  const withLevel = base + (PROFICIENCY_PROMPTS[proficiencyLevel] || '');
-  if (!resumeText) return withLevel;
-
-  return `${withLevel}
-
-CANDIDATE RESUME CONTEXT — this is the candidate's real background. Use it to ground every answer, not just personal-background questions:
-- If the question is about the candidate (background, work history, education, skills, previous projects), answer directly from this resume.
-- For technical/coding questions, still give the correct answer, but where relevant tailor it to the candidate's actual experience — reference real technologies, projects, or skills from the resume instead of generic examples.
-- If the resume doesn't contain something needed to answer, say so rather than inventing details.
-"""
-${resumeText}
-"""`;
+${HUMAN_STYLE}${getResumeRoleContext(resumeText, candidateProfile)}`;
 }
 
-module.exports = { SYSTEM_PROMPTS, PROFICIENCY_PROMPTS, HUMAN_STYLE, SCREEN_ANALYZE_PROMPT, getSystemPrompt };
+function getSystemPrompt(mode, resumeText, proficiencyLevel, candidateProfile) {
+  const base = SYSTEM_PROMPTS[mode] || SYSTEM_PROMPTS.interview;
+  return base + (PROFICIENCY_PROMPTS[proficiencyLevel] || '') + getResumeRoleContext(resumeText, candidateProfile);
+}
+
+module.exports = { SYSTEM_PROMPTS, PROFICIENCY_PROMPTS, HUMAN_STYLE, getScreenAnalyzePrompt, getSystemPrompt };
