@@ -25,7 +25,10 @@ function screenAnalyze(images, text, resumeText, candidateProfile, onChunk) {
       : 'Read the question or coding problem shown in the screenshot(s) and give a complete answer with code.'
   }`;
 
-  return askBackend(question, onChunk, 'groq', capped);
+  // askBackend now resolves { id, promise } (the id lets ask() in App.js
+  // cancel a question mid-flight for the voice continuation feature) —
+  // screenshot questions don't need that, so just unwrap the promise.
+  return askBackend(question, onChunk, 'groq', capped).then(({ promise }) => promise);
 }
 
 module.exports = { screenAnalyze };

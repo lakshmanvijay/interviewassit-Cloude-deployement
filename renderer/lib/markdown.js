@@ -52,6 +52,12 @@ function renderMarkdown(raw) {
   s = s.replace(/^# (.+)$/gm,   '<h3>$1</h3>');
   s = s.replace(/^[-*+] (.+)$/gm, '<li>$1</li>');
   s = s.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+  // Models often put a blank line between each bullet — without this, the
+  // grouping regex right below only merges *directly adjacent* <li> lines,
+  // so a blank-line-separated list fragments into one separate <ul> per
+  // item, each carrying its own top/bottom margin and stacking into a much
+  // bigger visual gap than a single list's li-to-li spacing.
+  s = s.replace(/(<\/li>)\n{2,}(?=<li>)/g, '$1\n');
   s = s.replace(/(<li>[\s\S]*?<\/li>\n?)+/g, m => `<ul>${m}</ul>`);
 
   const blkSegs = s.split(/(\x00BLK\d+\x00)/);

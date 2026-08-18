@@ -12,7 +12,11 @@ function MessageImpl({ store, id }) {
   // Separate slice, compared by value (a plain number) rather than object
   // reference — so this doesn't re-render on unrelated store changes the
   // way returning a new object every time would. Only user messages are
-  // numbered; assistant replies don't get a question number.
+  // numbered; assistant replies don't get a question number. A voice
+  // question is numbered from the moment it appears (while still being
+  // live-recognized, see voice.js's showLiveQuestion) — it's the same
+  // message/id all the way through, not a separate placeholder swapped out
+  // for a "real" one later.
   const questionNumber = useStoreSlice(store, s => {
     const msg = s.conversation.find(m => m.id === id);
     if (!msg || msg.role !== 'user') return null;

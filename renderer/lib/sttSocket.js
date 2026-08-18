@@ -20,7 +20,15 @@ const FINALIZE_READY_GRACE_MS = 1200;
 // is safe to call right away — audio sent before the server acks "ready" is
 // queued internally and flushed the instant it does, so callers don't need
 // to track connection state or buffer audio themselves.
-function connectSttSession(language) {
+//
+// `onPartial(text)`, if given, is called every time ANY transcript message
+// arrives — interim or final — with the best current guess of the whole
+// utterance so far (locked-in final segments + whatever's being recognized
+// right now). This is what lets a caller show live captions of the
+// interviewer's question growing on screen in real time, instead of only
+// finding out what was said once the whole utterance ends and finish()
+// resolves.
+function connectSttSession(language, onPartial) {
   let ws = null;
   let readyResolve, readyReject;
   let readySettled = false;
@@ -87,6 +95,14 @@ function connectSttSession(language) {
         // accumulated into the text this session ultimately resolves with.
         if (msg.isFinal && msg.text) {
           finalText = finalText ? `${finalText} ${msg.text}`.trim() : msg.text;
+        }
+        // Live caption: whether this segment is final or still interim,
+        // surface locked-in text + the in-progress segment as one growing
+        // string, so onPartial always gets "the best guess of the full
+        // utterance so far" rather than just the latest fragment.
+        if (onPartial && msg.text != null) {
+          const live = msg.isFinal ? finalText : (finalText ? `${finalText} ${msg.text}`.trim() : msg.text);
+          onPartial(live);
         }
       } else if (msg.type === 'error') {
         errorMessage = msg.message || 'STT error';

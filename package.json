@@ -1,6 +1,6 @@
 {
   "name": "stealth-interview-app",
-  "version": "2.0.11",
+  "version": "2.0.13",
   "description": "Screen-hidden AI interview assistant — local Ollama models + continuous voice recognition",
   "main": "main.js",
   "scripts": {

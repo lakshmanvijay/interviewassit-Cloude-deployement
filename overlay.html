@@ -259,6 +259,13 @@
   #conversation {
     flex: 1; overflow-y: auto; padding: 12px;
     display: flex; flex-direction: column; gap: 10px;
+    /* Chromium auto-adjusts scroll position whenever content changes size
+       anywhere in this container (CSS scroll anchoring) — during an
+       answer's streaming + its final swap to rendered markdown, that
+       fights and overrides the explicit scrollQuestionIntoTop() calls in
+       App.js/voice.js, ending up pinned to the answer instead of the
+       question. Disabling it hands scroll position entirely to our own JS. */
+    overflow-anchor: none;
   }
   #conversation::-webkit-scrollbar { width: 3px; }
   #conversation::-webkit-scrollbar-track { background: transparent; }
@@ -298,34 +305,42 @@
   .message.user      .message-role { color: var(--accent2); }
   .message.assistant .message-role { color: var(--accent); }
   .question-number {
-    font-weight: 800;
+    font-weight: 500;
     margin-right: 2px;
   }
   .message-content {
-    font-size: 11px; line-height: 1.65; color: var(--text);
+    font-size: 12.5px; line-height: 1.6; color: var(--text);
     background: rgba(255,255,255,0.03); border: 1px solid var(--border);
     border-radius: 8px; padding: 10px 12px;
     white-space: pre-wrap; word-break: break-word; user-select: text;
   }
   .message.user      .message-content { border-color: rgba(79,140,255,0.15); background: rgba(79,140,255,0.05); color: var(--text-dim); }
   /* Question text itself — bright red so the asked question stands out
-     clearly, even at a low background opacity. */
-  .message.user      .message-content.question-text { color: var(--danger); }
+     clearly, even at a low background opacity, but otherwise the exact
+     same size/weight as the answer text below it. */
+  .message.user      .message-content.question-text { color: var(--danger); font-size: 12.5px; font-weight: 400; }
   .message.assistant .message-content { border-color: rgba(99,255,180,0.1); }
   .message.assistant .message-content.streaming::after {
     content: '▋'; color: var(--accent);
     animation: blink 1s step-start infinite; margin-left: 1px;
   }
+  /* Inline code (function/variable names highlighted mid-sentence) matches
+     the surrounding prose's font + size exactly (inherit) rather than
+     switching to the monospace font used for actual multi-line code blocks
+     below — mixing a monospace font into running sentences read as visually
+     inconsistent/mismatched size even at the same px value. Dark backing so
+     it still reads as "code", but light enough not to look like a bold
+     chunky badge. */
   .message-content code {
-    font-family: var(--mono); font-size: 10.5px;
-    background: rgba(0,0,0,0.45); border: 1px solid rgba(99,255,180,0.18);
-    border-radius: 4px; padding: 1px 6px; color: #c3e88d;
+    font-family: inherit; font-size: inherit; font-weight: inherit;
+    background: rgba(0,0,0,0.25); border: none;
+    border-radius: 3px; padding: 0 3px; color: #c3e88d;
   }
   .message-content pre {
     background: #0d1117; border: 1px solid rgba(255,255,255,0.07);
     border-left: 3px solid #c792ea;
     border-radius: 7px; padding: 12px 14px; margin: 7px 0;
-    overflow-x: auto; font-size: 11px; line-height: 1.65;
+    overflow-x: auto; font-size: 13px; line-height: 1.6;
     font-family: var(--mono); position: relative;
   }
   .message-content pre code {
@@ -345,14 +360,15 @@
   /* ── ASSISTANT MARKDOWN STYLES ── */
   .message.assistant .message-content {
     font-family: var(--sans);
-    font-size: 13px;
-    line-height: 1.8;
+    font-size: 12.5px;
+    line-height: 1.7;
     color: #dde8f5;
   }
-  /* Bold = accent green — lets user scan key terms instantly */
+  /* Bold = accent green, medium weight — lets user scan key terms/buzzwords
+     instantly via color, without the text looking heavy/shouty. */
   .message.assistant .message-content strong {
     color: #63ffb4;
-    font-weight: 700;
+    font-weight: 500;
   }
   /* Italic = soft yellow — for tips, notes, caveats */
   .message.assistant .message-content em {
@@ -386,8 +402,8 @@
   .message.assistant .message-content p {
     margin: 0 0 8px;
     font-family: 'Arial', 'Helvetica Neue', sans-serif;
-    font-size: 13px;
-    line-height: 1.8;
+    font-size: 12.5px;
+    line-height: 1.7;
     color: #dde8f5;
   }
   .message.assistant .message-content p:last-child { margin-bottom: 0; }
