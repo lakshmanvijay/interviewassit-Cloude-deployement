@@ -3,8 +3,16 @@ const { connectSttSession } = require('./sttSocket');
 const { scrollElIntoTop } = require('./scroll');
 
 const VOICE_THRESHOLD  = 15;    // energy level above which we consider the user to be speaking
-const SILENCE_MS_SHORT = 1150;  // silence after a long question  (≥2 s speech) → fire fast
-const SILENCE_MS_LONG  = 2500;  // silence after a short fragment (<2 s speech) → small buffer
+// Trimmed down from 1150/2500 — this silence wait is pure dead time added on
+// top of STT finalization + the LLM's own time-to-first-token, and was the
+// single biggest lever available client-side to hit a ~2s total response
+// target. Trade-off: a shorter wait is more likely to cut off someone who
+// pauses mid-sentence (they'd need to rely on the continuation-regeneration
+// flow — see onSpeechResumed — to recover, rather than the pause just being
+// absorbed silently). If real usage shows too many premature cutoffs, raise
+// these back up rather than pushing them even lower.
+const SILENCE_MS_SHORT = 600;   // silence after a long question  (≥2 s speech) → fire fast
+const SILENCE_MS_LONG  = 1800;  // silence after a short fragment (<2 s speech) → small buffer
 const MIN_STT_INTERVAL_MS = 2500; // don't open more than one STT session every 3 seconds
 const NOISE_PHRASES = [
   'thank you', 'thanks', 'thank you.', 'thanks.', 'thank you!',
@@ -66,6 +74,18 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
   let vadLo      = 0;
   let vadHi      = 0;
   let meterEl    = null;
+
+  // When the last question was finalized/handed off (Date.now(), set in
+  // handleTranscript below) — used alongside "is the answer still
+  // streaming" to detect a continuation. Streaming-state alone isn't
+  // reliable: a fast answer (Cerebras can finish a short one in under a
+  // second) may already be done by the time someone resumes talking after
+  // just a 2s pause, which would otherwise misfire as a brand new,
+  // disconnected question instead of continuing the one they paused mid-way
+  // through. This time window catches that case regardless of how fast the
+  // answer happened to generate.
+  let lastQuestionAt = 0;
+  const CONTINUATION_WINDOW_MS = 4500;
 
   // Current utterance's live STT session, if one is open. sttSocket.js
   // handles queuing audio sent before the backend acks "ready" internally,
@@ -344,15 +364,21 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
         speechStartTime = Date.now();
         setVoiceStatus('speaking', 'speaking');
 
-        // If the previous question's answer is still generating/streaming
-        // right as the interviewer starts talking again, treat this as a
-        // CONTINUATION of that same question rather than a new one: reuse
-        // its message id and text as a base to append to, and tell App.js
-        // to cancel/replace the stale in-flight answer immediately (rather
-        // than let an answer to an incomplete question keep streaming).
+        // Treat this as a CONTINUATION of the previous question — reuse its
+        // message id and text as a base to append to, and tell App.js to
+        // cancel/replace the stale answer immediately — if EITHER:
+        // (a) that answer is still generating/streaming right now, or
+        // (b) it was asked very recently (within CONTINUATION_WINDOW_MS),
+        //     even if it already finished streaming. (b) is what actually
+        //     covers a normal mid-sentence pause: a fast answer can finish
+        //     generating in under a second, so relying on "still streaming"
+        //     alone would misfire as a brand new question the moment
+        //     someone resumes just slightly slower than the answer.
         const conv = store.getState().conversation;
         const lastMsg = conv[conv.length - 1];
-        const isContinuation = !!(lastMsg && lastMsg.role === 'assistant' && lastMsg.streaming);
+        const stillStreaming = !!(lastMsg && lastMsg.role === 'assistant' && lastMsg.streaming);
+        const withinWindow = lastQuestionAt > 0 && (Date.now() - lastQuestionAt) < CONTINUATION_WINDOW_MS;
+        const isContinuation = stillStreaming || withinWindow;
 
         if (isContinuation) {
           const userMsgs = conv.filter(m => m.role === 'user');
@@ -379,7 +405,10 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
     } else if (isSpeaking) {
       if (!silenceTimer) {
         const spokenMs = Date.now() - speechStartTime;
-        const waitMs   = spokenMs >= 2000 ? SILENCE_MS_SHORT : SILENCE_MS_LONG;
+        // Lowered from 2000ms — most real interview questions are complete
+        // thoughts well under 2s of continuous speech, so that threshold was
+        // routing the common case into the slower SILENCE_MS_LONG wait.
+        const waitMs   = spokenMs >= 1200 ? SILENCE_MS_SHORT : SILENCE_MS_LONG;
 
         silenceTimer = setTimeout(async () => {
           isSpeaking   = false;
@@ -420,6 +449,10 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
       : text;
 
     console.log('[voice] asking:', JSON.stringify(combinedText), wasContinuation ? '(continuation)' : '');
+    // Marks "just asked" for the continuation time-window check in vadLoop
+    // above — resets on every question (new or continued) so the window
+    // always measures from the most recent one, not the very first.
+    lastQuestionAt = Date.now();
     // Hand the live bubble's id off rather than clearing it — App.js's
     // ask() (when autoAsk is on) finalizes that exact same bubble in place
     // instead of creating a second new one. detachLiveQuestion() also resets
