@@ -1,10 +1,11 @@
 const { ipcRenderer } = require('electron');
 const { connectSttSession } = require('./sttSocket');
+const { scrollElIntoTop } = require('./scroll');
 
 const VOICE_THRESHOLD  = 15;    // energy level above which we consider the user to be speaking
-const SILENCE_MS_SHORT = 1200;  // silence after a long question  (≥2 s speech) → fire fast
+const SILENCE_MS_SHORT = 1150;  // silence after a long question  (≥2 s speech) → fire fast
 const SILENCE_MS_LONG  = 2500;  // silence after a short fragment (<2 s speech) → small buffer
-const MIN_STT_INTERVAL_MS = 3000; // don't open more than one STT session every 3 seconds
+const MIN_STT_INTERVAL_MS = 2500; // don't open more than one STT session every 3 seconds
 const NOISE_PHRASES = [
   'thank you', 'thanks', 'thank you.', 'thanks.', 'thank you!',
   'mm-hmm', 'mm-hmm.', 'mmm', 'mm', 'hmm', 'uh', 'um',
@@ -49,7 +50,7 @@ function downsampleTo16kPCM16(float32, inputSampleRate) {
 // Owns the whole VAD / live-STT pipeline. The VAD meter is written
 // directly to a DOM node via `attachMeterEl` (bypassing the store/vdom) so
 // the ~20fps energy readout never triggers a component re-render.
-function createVoiceController({ store, onTranscript, showOnScreen }) {
+function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResumed }) {
   let listening       = false;
   let audioCtx        = null;
   let analyserNode    = null;
@@ -75,6 +76,75 @@ function createVoiceController({ store, onTranscript, showOnScreen }) {
 
   function setVoiceStatus(text, cls) { store.setState({ voiceStatus: { text, cls: cls || '' } }); }
   function updateLiveTranscript(t)   { store.setState({ liveTranscript: t }); }
+
+  // Live question bubble — renders the interviewer's words directly into
+  // its own numbered Q slot in the main conversation feed as they're
+  // recognized (a completely normal user message from the moment it's
+  // created — no separate placeholder bubble that then gets thrown away and
+  // replaced), instead of a small status line above. `liveMsgId` is
+  // per-utterance (freshly generated in beginUtterance below, cleared once
+  // handed off) rather than a fixed constant — reusing one fixed id across
+  // utterances would let the *next* question's live updates overwrite an
+  // already-finalized *previous* question that still happens to share the id.
+  let liveMsgId = null;
+
+  // Non-empty when the current utterance is a CONTINUATION of the previous
+  // question (interviewer resumed talking while its answer was still
+  // streaming) rather than a brand new one — holds that previous question's
+  // already-asked text, which newly recognized words get appended to. See
+  // the continuation-detection block in vadLoop below.
+  let continuationBase = '';
+
+  function showLiveQuestion(newText) {
+    if (!liveMsgId) return;
+    const id = liveMsgId;
+    const text = continuationBase ? `${continuationBase} ${newText}`.trim() : newText;
+    store.setState(s => {
+      const idx = s.conversation.findIndex(m => m.id === id);
+      if (idx === -1) {
+        return { conversation: [...s.conversation, { id, role: 'user', content: text }] };
+      }
+      if (s.conversation[idx].content === text) return {}; // no-op, skip a re-render
+      const conversation = s.conversation.slice();
+      conversation[idx] = { ...conversation[idx], content: text };
+      return { conversation };
+    });
+  }
+
+  // Abandons the current live bubble — used when the utterance turns out to
+  // be empty/noise/errored, or listening is stopped mid-utterance — as
+  // opposed to detachLiveQuestion() below, used when it's being handed
+  // off/kept. For a brand-new (non-continuation) bubble this deletes it
+  // outright (it was never a real question). For a continuation, the bubble
+  // IS a real, already-asked question reused by id — deleting it would wipe
+  // it from history, so this reverts its content back to just the original
+  // base text instead, undoing the abandoned continuation attempt.
+  function abandonLiveQuestion() {
+    if (!liveMsgId) return;
+    const id = liveMsgId;
+    const base = continuationBase;
+    liveMsgId = null;
+    continuationBase = '';
+    if (base) {
+      store.setState(s => ({ conversation: s.conversation.map(m => (m.id === id ? { ...m, content: base } : m)) }));
+    } else {
+      store.setState(s => {
+        if (!s.conversation.some(m => m.id === id)) return {}; // no-op
+        return { conversation: s.conversation.filter(m => m.id !== id) };
+      });
+    }
+  }
+
+  // Hands the live bubble's id off to the caller (App.js's ask(), to
+  // finalize/reuse it as the real submitted question) and resets liveMsgId +
+  // continuationBase so the *next* utterance is guaranteed to allocate a
+  // fresh id instead of touching this now-handed-off one.
+  function detachLiveQuestion() {
+    const id = liveMsgId;
+    liveMsgId = null;
+    continuationBase = '';
+    return id;
+  }
 
   function setVadMeter(energy) {
     if (!meterEl) return;
@@ -142,6 +212,7 @@ function createVoiceController({ store, onTranscript, showOnScreen }) {
     analyserNode = null; isSpeaking = false;
     setVoiceStatus('● audio off', '');
     updateLiveTranscript('');
+    abandonLiveQuestion();
     setVadMeter(0);
   }
 
@@ -181,7 +252,11 @@ function createVoiceController({ store, onTranscript, showOnScreen }) {
 
   function beginUtterance() {
     const now = Date.now();
-    if (now - lastSttRequestTs < MIN_STT_INTERVAL_MS) {
+    // Continuations skip the rate limit entirely — by this point the
+    // in-flight answer has already been cancelled (onSpeechResumed fired in
+    // vadLoop below), so skipping here would leave that cancelled answer
+    // stranded with nothing to ever replace it.
+    if (!continuationBase && now - lastSttRequestTs < MIN_STT_INTERVAL_MS) {
       // Rate-limited — skip opening a new backend connection for this
       // utterance (unlike a local recording, opening a live socket is a
       // real backend resource, so this is checked at speech-start now
@@ -192,7 +267,15 @@ function createVoiceController({ store, onTranscript, showOnScreen }) {
     lastSttRequestTs = now;
 
     console.log('[voice] utterance started, opening STT session');
-    const session = connectSttSession('en');
+    // Live captions: show the interviewer's words directly in the main
+    // conversation feed as they're recognized (showLiveQuestion), instead of
+    // the small voice-bar status line. Guarded by `sttSession === session`
+    // so a stale callback from an already-replaced session (e.g.
+    // rate-limited then a new one opened) can't clobber the live bubble of
+    // the utterance actually in progress.
+    const session = connectSttSession('en', text => {
+      if (sttSession === session) showLiveQuestion(text);
+    });
     sttSession = session;
     session.ready()
       .then(() => {
@@ -209,7 +292,19 @@ function createVoiceController({ store, onTranscript, showOnScreen }) {
     const session = sttSession;
     sttSession = null;
 
-    if (!session) { console.log('[voice] endUtterance: no session was open'); updateLiveTranscript(''); return; }
+    if (!session) {
+      // No session ever opened for this utterance (e.g. beginUtterance()
+      // was rate-limited). Routed through handleTranscript('') rather than
+      // abandoning directly: for a plain question that just deletes the
+      // never-really-started live bubble as before, but for a continuation
+      // it makes sure the already-cancelled in-flight answer still gets
+      // regenerated (falling back to the original question text alone)
+      // instead of being left stranded with nothing to replace it.
+      console.log('[voice] endUtterance: no session was open');
+      updateLiveTranscript('');
+      await handleTranscript('');
+      return;
+    }
 
     console.log('[voice] utterance ended, finalizing STT session');
     const { text, error } = await session.finish();
@@ -220,6 +315,7 @@ function createVoiceController({ store, onTranscript, showOnScreen }) {
       showOnScreen('STT error: ' + error);
       setVoiceStatus('capturing internal audio', 'live');
       updateLiveTranscript('');
+      await handleTranscript(''); // same fallback reasoning as above
       return;
     }
 
@@ -247,7 +343,36 @@ function createVoiceController({ store, onTranscript, showOnScreen }) {
         isSpeaking      = true;
         speechStartTime = Date.now();
         setVoiceStatus('speaking', 'speaking');
-        updateLiveTranscript('🔊 interviewer speaking…');
+
+        // If the previous question's answer is still generating/streaming
+        // right as the interviewer starts talking again, treat this as a
+        // CONTINUATION of that same question rather than a new one: reuse
+        // its message id and text as a base to append to, and tell App.js
+        // to cancel/replace the stale in-flight answer immediately (rather
+        // than let an answer to an incomplete question keep streaming).
+        const conv = store.getState().conversation;
+        const lastMsg = conv[conv.length - 1];
+        const isContinuation = !!(lastMsg && lastMsg.role === 'assistant' && lastMsg.streaming);
+
+        if (isContinuation) {
+          const userMsgs = conv.filter(m => m.role === 'user');
+          const prevUser = userMsgs[userMsgs.length - 1];
+          liveMsgId = prevUser.id;
+          continuationBase = prevUser.content;
+          if (onSpeechResumed) onSpeechResumed(liveMsgId);
+        } else {
+          liveMsgId = 'q_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+          continuationBase = '';
+        }
+        showLiveQuestion(isContinuation ? '' : '🔊 …');
+
+        // Scroll the question into view the instant it starts appearing —
+        // not after it's fully recognized. `thisLiveId` is captured now
+        // rather than reading the outer `liveMsgId` inside the delayed
+        // callback, so a fast next utterance overwriting `liveMsgId` in the
+        // meantime can't make this scroll to the wrong bubble.
+        const thisLiveId = liveMsgId;
+        scrollElIntoTop(() => document.querySelector(`[data-msg-id="${thisLiveId}"]`));
         beginUtterance();
       }
 
@@ -260,7 +385,7 @@ function createVoiceController({ store, onTranscript, showOnScreen }) {
           isSpeaking   = false;
           silenceTimer = null;
           setVoiceStatus('capturing internal audio', 'live');
-          updateLiveTranscript('Transcribing…');
+          showLiveQuestion('Transcribing…');
           await endUtterance();
         }, waitMs);
       }
@@ -271,25 +396,37 @@ function createVoiceController({ store, onTranscript, showOnScreen }) {
 
   async function handleTranscript(rawText) {
     const text = (rawText || '').trim();
+    const wasContinuation = !!continuationBase;
+    const base = continuationBase;
+    const isNoiseOrEmpty = !text || NOISE_PHRASES.includes(text.toLowerCase()) || text.split(/\s+/).length < 3;
 
-    if (!text) {
-      console.log('[voice] transcript was empty — nothing to ask');
+    if (isNoiseOrEmpty && !wasContinuation) {
+      // A genuinely new, standalone utterance that turned out to be
+      // silence/noise/too short — nothing real was ever asked, so just
+      // drop the live bubble.
+      console.log('[voice] transcript discarded as empty/noise:', JSON.stringify(text));
       setVoiceStatus('capturing internal audio', 'live');
-      updateLiveTranscript('');
+      abandonLiveQuestion();
       return;
     }
 
-    if (NOISE_PHRASES.includes(text.toLowerCase()) || text.split(/\s+/).length < 3) {
-      console.log('[voice] transcript discarded as noise/too short:', JSON.stringify(text));
-      setVoiceStatus('capturing internal audio', 'live');
-      updateLiveTranscript('');
-      return;
-    }
+    // A continuation ALWAYS hands off, even if the new fragment itself was
+    // noise/empty — App.js's onSpeechResumed already cancelled the previous
+    // in-flight answer the moment this utterance started, so at minimum we
+    // must regenerate using the original question alone rather than leaving
+    // that cancelled answer's bubble stuck empty with nothing to replace it.
+    const combinedText = wasContinuation
+      ? (isNoiseOrEmpty ? base : `${base} ${text}`.trim())
+      : text;
 
-    console.log('[voice] asking:', JSON.stringify(text));
-    updateLiveTranscript(text);
-    await onTranscript(text);
-    if (listening) updateLiveTranscript('');
+    console.log('[voice] asking:', JSON.stringify(combinedText), wasContinuation ? '(continuation)' : '');
+    // Hand the live bubble's id off rather than clearing it — App.js's
+    // ask() (when autoAsk is on) finalizes that exact same bubble in place
+    // instead of creating a second new one. detachLiveQuestion() also resets
+    // liveMsgId/continuationBase so the *next* utterance is guaranteed a
+    // fresh id.
+    const liveId = detachLiveQuestion();
+    await onTranscript(combinedText, liveId, wasContinuation);
     setVoiceStatus('capturing internal audio', 'live');
   }
 

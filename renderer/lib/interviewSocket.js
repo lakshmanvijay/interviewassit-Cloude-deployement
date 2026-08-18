@@ -123,9 +123,10 @@ function disconnect() {
   connectPromise = null;
 }
 
-// Returns a Promise<string> resolving with the full accumulated answer,
-// calling onDelta(accumulatedTextSoFar) as chunks arrive — same shape as
-// the old cerebrasChat() so App.js barely changes.
+// Resolves with { id, promise } — `id` lets a caller cancel this exact
+// in-flight question later (see cancelQuestion below), `promise` resolves
+// with the full accumulated answer, calling onDelta(accumulatedTextSoFar) as
+// chunks arrive — same shape the old cerebrasChat() used, just wrapped.
 //
 // `images` (optional array of base64 JPEG strings, no data-URL prefix) is
 // for screenshot/vision requests — the backend routes these to gemma-4-31b
@@ -139,7 +140,7 @@ async function askBackend(question, onDelta, provider, images) {
   const id = 'q_' + Date.now() + '_' + Math.random().toString(36).slice(2);
   const timeoutMs = images && images.length ? VISION_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
 
-  return new Promise((resolve, reject) => {
+  const promise = new Promise((resolve, reject) => {
     const timeoutTimer = setTimeout(() => {
       pending.delete(id);
       ws.send(JSON.stringify({ type: 'cancel', id }));
@@ -153,6 +154,30 @@ async function askBackend(question, onDelta, provider, images) {
     if (images && images.length) payload.images = images;
     ws.send(JSON.stringify(payload));
   });
+
+  return { id, promise };
 }
 
-module.exports = { connect, disconnect, askBackend };
+// Distinguishes a deliberate cancelQuestion() from a real backend/network
+// failure, so callers (App.js) can suppress the "Error: ..." bubble for a
+// question that was only abandoned because the interviewer kept talking and
+// a fuller, combined question is about to replace it.
+const CANCELLED_ERROR = 'CANCELLED';
+
+// Abandons an in-flight question before it resolves — used when the
+// interviewer resumes speaking mid-answer (see voice.js's continuation
+// detection): this speculative answer is about to be superseded by a
+// regenerated one using the fuller question, so there's no point letting it
+// keep streaming/consuming tokens.
+function cancelQuestion(id) {
+  const p = pending.get(id);
+  if (!p) return; // already resolved/rejected/never existed — nothing to do
+  clearTimeout(p.timeoutTimer);
+  pending.delete(id);
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try { ws.send(JSON.stringify({ type: 'cancel', id })); } catch (e) {}
+  }
+  p.reject(new Error(CANCELLED_ERROR));
+}
+
+module.exports = { connect, disconnect, askBackend, cancelQuestion, CANCELLED_ERROR };

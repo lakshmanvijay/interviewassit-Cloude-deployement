@@ -3,7 +3,7 @@ const { html } = require('./html');
 const { useRef, useEffect } = require('preact/hooks');
 
 const { getSystemPrompt } = require('./lib/prompts');
-const { connect: connectInterviewSocket, disconnect: disconnectInterviewSocket, askBackend } = require('./lib/interviewSocket');
+const { connect: connectInterviewSocket, disconnect: disconnectInterviewSocket, askBackend, cancelQuestion, CANCELLED_ERROR } = require('./lib/interviewSocket');
 const { screenAnalyze } = require('./lib/screenAnalyze');
 const { createVoiceController } = require('./lib/voice');
 const { createWarningController } = require('./lib/warning');
@@ -49,18 +49,43 @@ function App({ store }) {
     scrollElIntoTop(() => conversationRef.current && conversationRef.current.querySelector(`[data-msg-id="${userId}"]`));
   }
 
-  async function ask(text) {
+  // userId -> { assistantId, askId } for every question ever asked this
+  // session, kept for the lifetime of the app (not cleared per-question) so
+  // a continuation (see below) can find its way back to the SAME assistant
+  // bubble and in-flight backend request no matter how long ago the
+  // original ask() call already returned.
+  const askStateRef = useRef({});
+
+  // `liveUserId`, if given, is an already-on-screen user message (voice.js's
+  // live-recognized bubble, growing in place as the interviewer talks — see
+  // createVoiceController's onTranscript wiring below) that should be
+  // finalized in place rather than duplicated with a second new bubble.
+  // `isContinuation` means this is a regeneration of that same question with
+  // more words appended (the interviewer kept talking mid-answer) — reuses
+  // the existing assistant bubble instead of adding a second one.
+  async function ask(text, liveUserId, isContinuation) {
     text = (text || '').trim();
     if (!text) return;
 
-    // Captured *before* the new user message is appended below, so it holds
-    // prior turns only — the backend's WS API takes one flat `question`
-    // string (no separate messages array), so recent history gets folded
-    // into that string instead of duplicating the question we're about to ask.
-    const priorHistory = store.getState().conversation.slice(-2).map(m => ({ role: m.role, content: m.content }));
+    // Captured *before* the new/finalized user message is appended below, so
+    // it holds prior turns only — the backend's WS API takes one flat
+    // `question` string (no separate messages array), so recent history gets
+    // folded into that string instead of duplicating the question we're
+    // about to ask. Excludes the live bubble itself, since — if it exists —
+    // it's already sitting in `conversation` as this exact question, not a
+    // prior turn.
+    const priorHistory = store.getState().conversation
+      .filter(m => m.id !== liveUserId)
+      .slice(-2)
+      .map(m => ({ role: m.role, content: m.content }));
 
-    const userId = genId();
-    store.setState(s => ({ conversation: [...s.conversation, { id: userId, role: 'user', content: text }] }));
+    const reuseLive = liveUserId && store.getState().conversation.some(m => m.id === liveUserId);
+    const userId = reuseLive ? liveUserId : genId();
+    if (reuseLive) {
+      updateMessage(userId, { content: text });
+    } else {
+      store.setState(s => ({ conversation: [...s.conversation, { id: userId, role: 'user', content: text }] }));
+    }
     scrollQuestionIntoTop(userId);
 
     const { mode, resumeText, proficiencyLevel, interviewSettings } = store.getState();
@@ -70,8 +95,18 @@ function App({ store }) {
       : '';
     const question = `${systemPrompt}${historyText}\n\nNEW QUESTION:\n${text}`;
 
-    const assistantId = genId();
-    store.setState(s => ({ conversation: [...s.conversation, { id: assistantId, role: 'assistant', content: '', streaming: true }] }));
+    // A continuation reuses the SAME assistant bubble it's replacing —
+    // cancelInFlight() below already reset it to empty/streaming the moment
+    // the interviewer resumed talking — instead of adding a second one.
+    const existing = askStateRef.current[userId];
+    let assistantId;
+    if (isContinuation && existing) {
+      assistantId = existing.assistantId;
+      updateMessage(assistantId, { content: '', streaming: true });
+    } else {
+      assistantId = genId();
+      store.setState(s => ({ conversation: [...s.conversation, { id: assistantId, role: 'assistant', content: '', streaming: true }] }));
+    }
 
     let lastRenderAt = 0;
     try {
@@ -81,20 +116,51 @@ function App({ store }) {
       // much slower provider (this has happened before — see the "No LLM
       // provider configured" incident). Remove this pin once the backend
       // default is confirmed fixed, if you'd rather not hardcode it here.
-      const reply = await askBackend(question, partial => {
+      const { id: askId, promise } = await askBackend(question, partial => {
         const now = performance.now();
         if (now - lastRenderAt < 30) return;
         lastRenderAt = now;
         updateMessage(assistantId, { content: partial });
+        // Keep the question re-pinned to the top on every chunk, not just
+        // once at the start — as the answer streams in and grows taller
+        // below it, the browser can nudge scroll position on its own
+        // (reflow/scroll-anchoring), which would otherwise let the question
+        // drift down out of the top spot over the course of a long answer.
+        scrollQuestionIntoTop(userId);
       }, 'cerebras');
+      // Recorded so a later continuation can find this bubble/request again,
+      // and so cancelInFlight() can abort this exact request by id.
+      askStateRef.current[userId] = { assistantId, askId };
+
+      const reply = await promise;
       updateMessage(assistantId, { content: reply, streaming: false });
       warningRef.current.showWarning('');
     } catch (err) {
-      updateMessage(assistantId, { content: 'Error: ' + err.message, streaming: false });
-      warningRef.current.showWarning(err.message);
+      if (err.message === CANCELLED_ERROR) {
+        // Superseded by a continuation — cancelInFlight() already reset this
+        // bubble, and the continuation's own ask() call (already in flight
+        // or about to be) will fill it in with the regenerated answer. No
+        // error to show; this was deliberate, not a failure.
+      } else {
+        updateMessage(assistantId, { content: 'Error: ' + err.message, streaming: false });
+        warningRef.current.showWarning(err.message);
+      }
     } finally {
       scrollQuestionIntoTop(userId);
     }
+  }
+
+  // Called the instant the interviewer resumes speaking while `questionId`'s
+  // answer is still generating (see voice.js's onSpeechResumed, fired from
+  // its continuation-detection in vadLoop) — cancels the stale in-flight
+  // backend request right away and resets its bubble back to an
+  // empty/streaming state, so nothing outdated lingers on screen while the
+  // fuller, combined question is captured and (re)asked.
+  function cancelInFlight(questionId) {
+    const state = askStateRef.current[questionId];
+    if (!state) return;
+    cancelQuestion(state.askId);
+    updateMessage(state.assistantId, { content: '', streaming: true });
   }
 
   const voiceControllerRef = useRef(null);
@@ -102,10 +168,26 @@ function App({ store }) {
     voiceControllerRef.current = createVoiceController({
       store,
       showOnScreen: warningRef.current.showOnScreen,
-      onTranscript: async text => {
+      onSpeechResumed: questionId => cancelInFlight(questionId),
+      onTranscript: async (text, liveUserId, isContinuation) => {
         if (store.getState().autoAsk) {
-          await ask(text);
+          await ask(text, liveUserId, isContinuation);
           return;
+        }
+        // Not auto-asking — the text goes into the input box instead of
+        // being submitted. A brand-new live bubble was never a submitted
+        // question, so it comes back out; a continuation's bubble IS a real,
+        // already-asked question though, so it's left alone (autoAsk being
+        // off just means the follow-up doesn't get auto-submitted).
+        if (liveUserId && !isContinuation) {
+          store.setState(s => ({ conversation: s.conversation.filter(m => m.id !== liveUserId) }));
+        } else if (isContinuation) {
+          // autoAsk was switched off in the narrow window between speech
+          // resuming (which already cancelled the in-flight answer via
+          // cancelInFlight) and this utterance finishing — nothing will call
+          // ask() now, so that bubble would otherwise be stuck empty forever.
+          const state = askStateRef.current[liveUserId];
+          if (state) updateMessage(state.assistantId, { content: '_Auto-ask was turned off mid-answer — press Send to get an answer._', streaming: false });
         }
         const el = inputRef.current;
         el.value = (el.value ? el.value + ' ' : '') + text;
@@ -136,6 +218,7 @@ function App({ store }) {
         if (now - lastRenderAt < 30) return;
         lastRenderAt = now;
         updateMessage(assistantId, { content: partial });
+        scrollQuestionIntoTop(userId);
       });
       updateMessage(assistantId, { content: reply, streaming: false });
     } catch (err) {
