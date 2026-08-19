@@ -6,8 +6,11 @@ const { ScreenshotStrip } = require('./ScreenshotStrip');
 // is read straight off the DOM at send time, exactly like the original
 // vanilla version, so keystrokes never round-trip through the store.
 function InputArea({ store, inputRef, onSend }) {
-  const sendDisabled = useStoreSlice(store, s => s.sendDisabled);
-  const collapsed    = useStoreSlice(store, s => s.collapsed);
+  const sendDisabled   = useStoreSlice(store, s => s.sendDisabled);
+  const collapsed      = useStoreSlice(store, s => s.collapsed);
+  // Hidden until the user clicks "Continue" on the pre-session screen
+  // (EmptyState, gated there on account.credits > 0) — see store.js.
+  const sessionStarted = useStoreSlice(store, s => s.sessionStarted);
 
   function handleInput(e) {
     const el = e.currentTarget;
@@ -18,6 +21,8 @@ function InputArea({ store, inputRef, onSend }) {
   function handleKeyDown(e) {
     if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); onSend(); }
   }
+
+  if (!sessionStarted) return null;
 
   return html`
     <div id="input-area" style=${collapsed ? 'display:none' : ''}>

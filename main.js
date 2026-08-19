@@ -1,4 +1,4 @@
-const { app, BrowserWindow, globalShortcut, ipcMain, screen, Tray, Menu, nativeImage, session, desktopCapturer, shell, safeStorage } = require('electron');
+const { app, BrowserWindow, globalShortcut, ipcMain, screen, Tray, Menu, nativeImage, session, desktopCapturer, shell, safeStorage, powerMonitor } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const log = require('electron-log');
 const path = require('path');
@@ -271,9 +271,12 @@ function fetchBuffer(url) {
 }
 
 // GET with a Bearer auth header, same request style as fetchBuffer/fetchJson
-// above — used for /api/interview-settings/me, which (unlike the login/resume
-// endpoints) requires the session token as Authorization rather than a body.
-function fetchJsonAuth(url, token, timeoutMs) {
+// above — used for every /api/*/me-style endpoint, which (unlike the
+// login/resume endpoints) requires the session token as Authorization rather
+// than a body. `label` is just for error messages, so a 404/500 says which
+// endpoint broke rather than a bare status code — several of these often
+// 404 simply because a local/dev backend doesn't have that route wired up.
+function fetchJsonAuth(url, token, timeoutMs, label) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
     const lib = parsed.protocol === 'https:' ? https : http;
@@ -283,10 +286,7 @@ function fetchJsonAuth(url, token, timeoutMs) {
       res.on('end', () => {
         const body = Buffer.concat(chunks).toString('utf8');
         if (res.statusCode < 200 || res.statusCode >= 300) {
-          // Body included so a 404 shows *which* URL/route is missing rather
-          // than just a bare status code — this endpoint often 404s simply
-          // because the local/dev backend doesn't have it wired up yet.
-          return reject(new Error(`Interview settings fetch (${url}) returned ${res.statusCode}: ${body.slice(0, 300)}`));
+          return reject(new Error(`${label || 'Request'} (${url}) returned ${res.statusCode}: ${body.slice(0, 300)}`));
         }
         try {
           resolve(JSON.parse(body));
@@ -296,21 +296,136 @@ function fetchJsonAuth(url, token, timeoutMs) {
       });
     });
     req.on('error', reject);
-    if (timeoutMs) req.setTimeout(timeoutMs, () => req.destroy(new Error('Interview settings fetch timed out')));
+    if (timeoutMs) req.setTimeout(timeoutMs, () => req.destroy(new Error(`${label || 'Request'} timed out`)));
   });
 }
 
-// Derives from the same (possibly remote-config-overridden) host as
+// All derive from the same (possibly remote-config-overridden) host as
 // LOGIN_API_URL, same reasoning as get-ws-url below — never drifts out of
-// sync with it. Response shape: { role, proficiency, mode }.
+// sync with it.
 function fetchInterviewSettings(token) {
   const api = new URL(LOGIN_API_URL);
-  return fetchJsonAuth(`${api.protocol}//${api.host}/api/interview-settings/me`, token, 8000);
+  return fetchJsonAuth(`${api.protocol}//${api.host}/api/interview-settings/me`, token, 8000, 'Interview settings fetch');
+}
+
+// AuthResponse: { token, id, name, email, plan, credits, creditsExpireAt,
+// resume, avatar, provider, joinedAt } — same shape the login POST already
+// returns, but this is the dedicated read-only refresh endpoint: used to
+// pick up a credits/creditsExpireAt change (e.g. after buying credits on the
+// website) without forcing a full re-login.
+function fetchAccountMe(token) {
+  const api = new URL(LOGIN_API_URL);
+  return fetchJsonAuth(`${api.protocol}//${api.host}/api/auth/me`, token, 8000, 'Account refresh');
+}
+
+// PaymentHistoryItem[]: [{ id, description, amountPaise, currency, status,
+// createdAt }] — status is CREATED | PAID | FAILED.
+function fetchPaymentHistory(token) {
+  const api = new URL(LOGIN_API_URL);
+  return fetchJsonAuth(`${api.protocol}//${api.host}/api/payments/me`, token, 8000, 'Payment history fetch');
+}
+
+// InterviewSessionResponse[] — used at login/session-restore to find an
+// already-active Live Assist session (assistExpiresAt still in the future)
+// so its countdown survives an app restart instead of only being known
+// right after clicking "Start listening" this same run.
+function fetchActiveSessions(token) {
+  const api = new URL(LOGIN_API_URL);
+  return fetchJsonAuth(`${api.protocol}//${api.host}/api/sessions/me`, token, 8000, 'Sessions fetch');
+}
+
+// POST with a JSON body + Bearer auth — same request style as
+// fetchAccountFromApi above. Never rejects on a non-2xx response (unlike
+// fetchJsonAuth) — resolves { ok, status, body } uniformly instead, so the
+// caller can branch on `status` (e.g. 402) without try/catch gymnastics.
+// True rejection is reserved for actual network/parse failures.
+function postJsonAuth(url, token, payload, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const lib = parsed.protocol === 'https:' ? https : http;
+    const body = JSON.stringify(payload || {});
+    const req = lib.request({
+      hostname: parsed.hostname,
+      port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+      path: parsed.pathname + parsed.search,
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body)
+      }
+    }, res => {
+      let data = '';
+      res.on('data', c => (data += c));
+      res.on('end', () => {
+        let parsedBody = null;
+        try { parsedBody = data ? JSON.parse(data) : null; } catch (e) { parsedBody = { raw: data }; }
+        resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, body: parsedBody });
+      });
+    });
+    req.write(body);
+    req.on('error', reject);
+    if (timeoutMs) req.setTimeout(timeoutMs, () => req.destroy(new Error('Session start request timed out')));
+    req.end();
+  });
+}
+
+// Opens (or reuses, if one's already active) a Live Assist session — spends
+// 1 credit the moment a fresh one opens, buying assistExpiresAt (1 hour) of
+// unmetered questions. Same host as LOGIN_API_URL. Resolves
+// { ok, status, body } — status 402 specifically means "no credits", which
+// the renderer surfaces distinctly (see App.js's startLiveAssistSession IPC
+// handler usage) rather than as a generic error.
+function startLiveAssistSession(token) {
+  const api = new URL(LOGIN_API_URL);
+  return postJsonAuth(`${api.protocol}//${api.host}/api/sessions/start`, token, { sessionType: 'Live Assist' }, 10000);
+}
+
+// Closes whatever Live Assist window is currently open, so idle time after
+// this point isn't billed. Resolves { ok, status, body } same as start —
+// status 200 means a window was actually closed (body is the now-closed
+// InterviewSessionResponse), 204 means nothing was open (body is null,
+// still `ok: true` since 204 is in the 2xx range — that's a legitimate
+// no-op, not a failure). Called on explicit user pause/quit AND best-effort
+// on system sleep / app quit (see powerMonitor + before-quit below) — the
+// backend also auto-closes on WS disconnect as a safety net, but that's not
+// a substitute for calling this explicitly, since the socket can stay
+// connected through an idle stretch that should still stop billing.
+function pauseLiveAssistSession(token) {
+  const api = new URL(LOGIN_API_URL);
+  return postJsonAuth(`${api.protocol}//${api.host}/api/sessions/pause`, token, {}, 10000);
+}
+
+// CreditBalanceResponse: { totalMinutesAvailable, lots: [{ id, item,
+// minutesGranted, minutesRemaining, purchasedAt, activatedAt, expiresAt }] }
+// — the source of truth for "how much time is left" display, refreshed
+// after every Activate/Pause per the backend's own guidance rather than
+// relying on the AuthResponse's simpler credits/creditsExpireAt snapshot.
+function fetchCreditBalance(token) {
+  const api = new URL(LOGIN_API_URL);
+  return fetchJsonAuth(`${api.protocol}//${api.host}/api/payments/credits`, token, 8000, 'Credit balance fetch');
+}
+
+// { name, size, contentType, url, uploadedAt } — `name` is the real
+// filename the user uploaded on the web app, unlike account.resume (an
+// AuthResponse field that's just a URL — its last path segment is a random
+// public access token, not a filename, which is what was showing up as an
+// "id" before this). 404s when no resume has been uploaded.
+function fetchResumeInfo(token) {
+  const api = new URL(LOGIN_API_URL);
+  return fetchJsonAuth(`${api.protocol}//${api.host}/api/resumes/me`, token, 8000, 'Resume info fetch');
 }
 
 async function parseResume(url) {
+  // pdf-parse's underlying pdf.js dependency prints its own noisy, non-fatal
+  // warnings straight to console.warn/error while parsing (e.g. "Warning:
+  // Indexing all PDF objects") — nothing we log ourselves, but still visible
+  // at runtime. Silenced only for the duration of the parse call itself, and
+  // always restored in `finally` even if parsing throws.
+  const realWarn = console.warn, realError = console.error;
+  console.warn = () => {};
+  console.error = () => {};
   try {
-    console.log(`[resume] fetching + parsing: ${url}`);
     // Deferred require — only pay the require() cost when actually needed.
     // pdf-parse@1.x is a plain text extractor with no DOM/canvas dependency,
     // unlike 2.x (which wraps pdf.js and needs browser globals like
@@ -318,26 +433,19 @@ async function parseResume(url) {
     const pdfParse = require('pdf-parse');
     const buffer = await fetchBuffer(url);
 
-    // pdf-parse throws an opaque "Invalid PDF structure" with no context when
-    // the response isn't actually a PDF (e.g. the endpoint returned a JSON
-    // error body or an HTML page with a 200 status instead of the file bytes)
-    // — check the magic bytes ourselves first so we can log what we actually
-    // got instead of just a useless parse error.
-    if (buffer.slice(0, 4).toString('latin1') !== '%PDF') {
-      console.error(
-        `[resume] response from ${url} is not a PDF (${buffer.length} bytes). ` +
-        `First 500 bytes:\n${buffer.slice(0, 500).toString('utf8')}`
-      );
-      return '';
-    }
+    // Not every fetch actually returns a PDF (e.g. a JSON error body or an
+    // HTML page with a 200 status instead of the file bytes) — pdf-parse's
+    // own error for that case is an opaque "Invalid PDF structure" either
+    // way, so this is just a quiet early-out, nothing printed.
+    if (buffer.slice(0, 4).toString('latin1') !== '%PDF') return '';
 
     const result = await pdfParse(buffer);
-    const text = (result.text || '').slice(0, RESUME_TEXT_MAX_CHARS);
-    console.log(`[resume] extracted ${text.length} chars:\n${text}`);
-    return text;
+    return (result.text || '').slice(0, RESUME_TEXT_MAX_CHARS);
   } catch (e) {
-    console.error('[resume] parse failed:', e.message);
     return '';
+  } finally {
+    console.warn = realWarn;
+    console.error = realError;
   }
 }
 
@@ -360,6 +468,13 @@ function createOverlayWindow() {
     skipTaskbar: true,
     resizable: true,
     movable: true,
+    // Reverted back to focusable — a non-focusable window (the earlier
+    // always-on "Background mode") can never receive OS keyboard focus at
+    // all, so typing into the question box literally couldn't work no
+    // matter what the HTML disabled attribute said. That trade-off
+    // (never-take-focus stealth vs. a working text box) isn't what's
+    // wanted — typing needs to work, so this is a normal focusable window
+    // again, same as before Background mode was introduced.
     focusable: true,
     webPreferences: {
       nodeIntegration: true,
@@ -418,10 +533,28 @@ function createOverlayWindow() {
 // notifyRenderer above.
 let pendingAccount = null;
 
+// Non-null only while there's an already-active Live Assist session found
+// via fetchActiveSessions at login/session-restore (assistExpiresAt still in
+// the future) — lets its countdown survive an app restart. Cleared on logout.
+let pendingActiveAssistExpiresAt = null;
+
+// CreditBalanceResponse, fetched alongside the rest at login/session-restore
+// so the welcome screen has real numbers immediately rather than waiting on
+// the first Activate/Pause round trip. Cleared on logout.
+let pendingCreditBalance = null;
+
+// { name, size, contentType, url, uploadedAt } from GET /api/resumes/me —
+// name is the real uploaded filename (see fetchResumeInfo's own comment).
+// Cleared on logout. Stays null if the user never uploaded a resume (404).
+let pendingResumeInfo = null;
+
 function notifyAccountRenderer() {
   if (pendingAccount) sendToOverlay('account-received', pendingAccount);
   if (resumeText) sendToOverlay('resume-parsed', resumeText);
   if (interviewSettings) sendToOverlay('interview-settings-received', interviewSettings);
+  if (pendingActiveAssistExpiresAt) sendToOverlay('active-assist-session', pendingActiveAssistExpiresAt);
+  if (pendingCreditBalance) sendToOverlay('credit-balance-received', pendingCreditBalance);
+  if (pendingResumeInfo) sendToOverlay('resume-info-received', pendingResumeInfo);
 }
 
 // Shared by both the deep-link login flow and the startup session-restore
@@ -450,6 +583,32 @@ function activateSession(token) {
           if (interviewSettings) sendToOverlay('interview-settings-received', interviewSettings);
         })
         .catch(e => console.error('[interview-settings] fetch failed:', e.message));
+
+      fetchActiveSessions(token)
+        .then(sessions => {
+          const active = (sessions || []).find(s =>
+            s.sessionType === 'Live Assist' && s.assistExpiresAt && new Date(s.assistExpiresAt).getTime() > Date.now()
+          );
+          pendingActiveAssistExpiresAt = active ? active.assistExpiresAt : null;
+          if (pendingActiveAssistExpiresAt) sendToOverlay('active-assist-session', pendingActiveAssistExpiresAt);
+        })
+        .catch(e => console.error('[sessions] fetch failed:', e.message));
+
+      fetchCreditBalance(token)
+        .then(balance => {
+          pendingCreditBalance = balance;
+          sendToOverlay('credit-balance-received', balance);
+        })
+        .catch(e => console.error('[payments] credit balance fetch failed:', e.message));
+
+      fetchResumeInfo(token)
+        .then(resume => {
+          pendingResumeInfo = resume;
+          sendToOverlay('resume-info-received', resume);
+        })
+        // 404 (no resume uploaded yet) lands here too — that's expected,
+        // not worth logging as an error; pendingResumeInfo just stays null.
+        .catch(() => {});
     })
     .catch(e => {
       console.error('[login] failed to fetch account from API:', e.message);
@@ -708,6 +867,18 @@ app.whenReady().then(() => {
 // bypasses app.quit() entirely.
 app.on('before-quit', () => {
   isQuitting = true;
+  // Best-effort — see pauseLiveAssistSessionBestEffort's own comment for why
+  // this can't reliably block quit to await the request, and why that's an
+  // acceptable trade-off given the backend's own WS-disconnect safety net.
+  pauseLiveAssistSessionBestEffort('app quit');
+});
+
+// System going to sleep — pause billing for whatever's idle during that
+// stretch. The WS likely stays "connected" through a sleep (OS-dependent,
+// not reliable enough to lean on), so this explicit call is the real
+// mechanism here, not the disconnect-based safety net.
+powerMonitor.on('suspend', () => {
+  pauseLiveAssistSessionBestEffort('system suspend');
 });
 
 app.on('will-quit', () => {
@@ -754,6 +925,9 @@ ipcMain.on('logout', () => {
   pendingAccount = null;
   resumeText = '';
   interviewSettings = null;
+  pendingActiveAssistExpiresAt = null;
+  pendingCreditBalance = null;
+  pendingResumeInfo = null;
   clearSessionToken();
   sendToOverlay('logged-out');
 });
@@ -764,6 +938,104 @@ ipcMain.on('logout', () => {
 // window, so the renderer has full main-process-equivalent access anyway —
 // this doesn't cross a security boundary that isn't already crossed.
 ipcMain.handle('get-session-token', () => sessionToken);
+
+// Called from the renderer when the user clicks "Start listening" —
+// opens/reuses a Live Assist session before the mic actually starts, so a
+// 402 (no credits) can be caught and shown as "buy credits" right there
+// instead of the mic silently starting and every question afterward failing
+// mid-stream. Returns { ok, status, body } — see startLiveAssistSession's
+// own comment. { ok: false, status: 0 } means it couldn't even reach the
+// backend (not signed in, or a network/timeout failure) — same 3-argument
+// error shape as an actual HTTP failure so the renderer only needs one
+// branch to check `status`, not two different failure code paths.
+ipcMain.handle('start-live-assist-session', async () => {
+  if (!sessionToken) return { ok: false, status: 0, body: { message: 'Not signed in' } };
+  try {
+    return await startLiveAssistSession(sessionToken);
+  } catch (e) {
+    console.error('[sessions] start-live-assist-session failed:', e.message);
+    return { ok: false, status: 0, body: { message: e.message } };
+  }
+});
+
+// Called from the renderer on explicit pause/quit (see App.js's
+// quitSession()). Also invoked internally (not via IPC) on system sleep and
+// app quit — see pauseLiveAssistSessionBestEffort below.
+ipcMain.handle('pause-live-assist-session', async () => {
+  if (!sessionToken) return { ok: false, status: 0, body: { message: 'Not signed in' } };
+  try {
+    return await pauseLiveAssistSession(sessionToken);
+  } catch (e) {
+    console.error('[sessions] pause-live-assist-session failed:', e.message);
+    return { ok: false, status: 0, body: { message: e.message } };
+  }
+});
+
+// Fire-and-forget pause used from non-IPC call sites (system sleep, app
+// quit) where nothing is waiting on a renderer round trip — those moments
+// don't have a live IPC caller to return a result to, so this just logs.
+function pauseLiveAssistSessionBestEffort(reason) {
+  if (!sessionToken) return;
+  pauseLiveAssistSession(sessionToken)
+    .then(result => console.log(`[sessions] best-effort pause (${reason}):`, result.status))
+    .catch(e => console.error(`[sessions] best-effort pause (${reason}) failed:`, e.message));
+}
+
+ipcMain.handle('get-credit-balance', async () => {
+  if (!sessionToken) return { ok: false, message: 'Not signed in' };
+  try {
+    const balance = await fetchCreditBalance(sessionToken);
+    return { ok: true, balance };
+  } catch (e) {
+    console.error('[payments] credit balance fetch failed:', e.message);
+    return { ok: false, message: e.message };
+  }
+});
+
+ipcMain.handle('get-resume-info', async () => {
+  if (!sessionToken) return { ok: false, message: 'Not signed in' };
+  try {
+    const resume = await fetchResumeInfo(sessionToken);
+    return { ok: true, resume }; // resume.name is the real filename
+  } catch (e) {
+    // A 404 (no resume uploaded) lands here too, same as any other failure —
+    // EmptyState.js already falls back to "Not uploaded" when resumeInfo is
+    // absent, so this doesn't need to distinguish "genuinely failed" from
+    // "just doesn't have one yet".
+    return { ok: false, message: e.message };
+  }
+});
+
+// Re-fetches the account (GET /api/auth/me) so the renderer can pick up a
+// fresh credits/creditsExpireAt after the user buys credits on the website
+// (an external browser purchase this app has no other way to know about)
+// without forcing a full re-login. Updates pendingAccount + re-sends
+// 'account-received' itself, and also returns the result directly so a
+// caller awaiting the invoke() doesn't have to wait on a separate event.
+ipcMain.handle('refresh-account', async () => {
+  if (!sessionToken) return { ok: false, message: 'Not signed in' };
+  try {
+    const account = await fetchAccountMe(sessionToken);
+    pendingAccount = account;
+    sendToOverlay('account-received', account);
+    return { ok: true, account };
+  } catch (e) {
+    console.error('[account] refresh failed:', e.message);
+    return { ok: false, message: e.message };
+  }
+});
+
+// GET /api/payments/me — PaymentHistoryItem[], for the purchase-history view.
+ipcMain.handle('get-payment-history', async () => {
+  if (!sessionToken) return { ok: false, message: 'Not signed in' };
+  try {
+    const history = await fetchPaymentHistory(sessionToken);
+    return { ok: true, history };
+  } catch (e) {
+    console.error('[payments] history fetch failed:', e.message);
+    return { ok: false, message: e.message };
+  }
+});
 
 // Derives the WS endpoint from the same (possibly remote-config-overridden)
 // host as LOGIN_API_URL, so it never drifts out of sync with it.

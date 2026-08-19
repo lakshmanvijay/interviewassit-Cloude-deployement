@@ -12,6 +12,8 @@ const { scrollElIntoTop } = require('./lib/scroll');
 
 const { TitleBar } = require('./components/TitleBar');
 const { SettingsPanel } = require('./components/SettingsPanel');
+const { ShortcutsModal } = require('./components/ShortcutsModal');
+const { PaymentHistoryModal } = require('./components/PaymentHistoryModal');
 const { StatusWarning } = require('./components/StatusWarning');
 const { UpdateBanner } = require('./components/UpdateBanner');
 const { VoiceBar } = require('./components/VoiceBar');
@@ -252,6 +254,57 @@ function App({ store }) {
     store.setState({ conversation: [], navIndex: -1 });
   }
 
+  // Pending auto-quit for an in-progress free trial (see startTrial below).
+  // Cleared in quitSession() too, so manually quitting early (the ⏻
+  // titlebar button) can't leave a stray timer that fires later and
+  // force-quits whatever session/trial is running by then.
+  const trialTimerRef = useRef(null);
+
+  // Ends the current interview: stops listening, wipes the conversation, and
+  // drops sessionStarted back to false — since EmptyState only renders once
+  // conversation is also empty (see Conversation.js), this is what actually
+  // brings the welcome screen back rather than just hiding the input box.
+  // Local UI reset happens immediately/synchronously for a snappy quit; the
+  // actual POST /api/sessions/pause call (so idle time afterward isn't
+  // billed) and balance refresh happen after, fire-and-forget from the
+  // caller's perspective. Safe to call even when nothing real was open (a
+  // purely local trial, or already-paused) — the backend just returns 204.
+  // assistExpiresAt IS cleared now (unlike before Pause existed) — Pause
+  // actually closes that window server-side, so leaving the countdown card
+  // showing "active" after this would be showing a window that's no longer
+  // open. The user's remaining minutes aren't lost (creditBalance still
+  // reflects them); Activate just opens a fresh window against them next time.
+  async function quitSession() {
+    clearTimeout(trialTimerRef.current);
+    voiceControllerRef.current.stopListening();
+    clearConversation();
+    store.setState({ sessionStarted: false, sessionStartError: null, assistExpiresAt: null });
+
+    const result = await ipcRenderer.invoke('pause-live-assist-session');
+    if (result.ok) {
+      const balanceResult = await ipcRenderer.invoke('get-credit-balance');
+      if (balanceResult.ok) store.setState({ creditBalance: balanceResult.balance });
+    }
+  }
+
+  // Local-only 10-minute free trial — no POST /api/sessions/start, no
+  // assistExpiresAt from the backend. Auto-quits itself via the same
+  // quitSession() path once the 10 minutes are up. trialUsedAt is persisted
+  // to localStorage (not just store state) so the 1-hour cooldown before the
+  // next trial survives an app restart, not just this session.
+  function startTrial() {
+    const usedAt = Date.now();
+    try { localStorage.setItem('vijayamai_trialUsedAt', String(usedAt)); } catch (e) {}
+    store.setState({ trialUsedAt: usedAt, sessionStarted: true, sessionStartError: null });
+    voiceControllerRef.current.toggleListen();
+
+    clearTimeout(trialTimerRef.current);
+    trialTimerRef.current = setTimeout(() => {
+      trialTimerRef.current = null;
+      quitSession();
+    }, 10 * 60 * 1000);
+  }
+
   // Only the background panel fades with this — text/icons/borders are
   // fixed, fully-legible colors in overlay.html's CSS and never dim, unlike
   // the old native BrowserWindow.setOpacity() which faded everything at once.
@@ -293,6 +346,18 @@ function App({ store }) {
     store.setState({ settingsOpen: false });
   }
 
+  function toggleShortcuts() {
+    store.setState(s => ({ shortcutsOpen: !s.shortcutsOpen }));
+  }
+
+  function closeShortcuts() {
+    store.setState({ shortcutsOpen: false });
+  }
+
+  function closePaymentHistory() {
+    store.setState({ paymentHistoryOpen: false });
+  }
+
   useEffect(() => {
     // Apply the store's initial opacity to the background CSS var — nothing
     // did this before the slider was first touched.
@@ -322,7 +387,18 @@ function App({ store }) {
       'account-received':       (_, account) => { store.setState({ account }); connectInterviewSocket().catch(() => {}); },
       'resume-parsed':          (_, text) => store.setState({ resumeText: text }),
       'interview-settings-received': (_, settings) => store.setState({ interviewSettings: settings }),
-      'logged-out':             () => { store.setState({ account: null, resumeText: '', interviewSettings: null }); disconnectInterviewSocket(); },
+      // CreditBalanceResponse, fetched at login/session-restore and after
+      // every Activate/Pause — see EmptyState.js/App.js's quitSession().
+      'credit-balance-received': (_, balance) => store.setState({ creditBalance: balance }),
+      // { name, size, contentType, url, uploadedAt } — name is the real
+      // uploaded filename, see EmptyState.js's setup-screen Resume row.
+      'resume-info-received':   (_, resume) => store.setState({ resumeInfo: resume }),
+      // An already-active Live Assist session found at login/session-restore
+      // (GET /api/sessions/me) — skips straight past the pre-session screen
+      // so its countdown survives an app restart instead of only being known
+      // right after clicking "Start listening" in this same run.
+      'active-assist-session':  (_, expiresAt) => store.setState({ assistExpiresAt: expiresAt, sessionStarted: true }),
+      'logged-out':             () => { store.setState({ account: null, resumeText: '', interviewSettings: null, sessionStarted: false, assistExpiresAt: null, sessionStartError: null, paymentHistoryOpen: false, creditBalance: null, resumeInfo: null }); disconnectInterviewSocket(); },
       'update-ready':           (_, { version }) => store.setState({ updateReady: true, updateVersion: version }),
     };
     Object.entries(listeners).forEach(([ch, fn]) => ipcRenderer.on(ch, fn));
@@ -352,13 +428,17 @@ function App({ store }) {
         onMinimize=${minimizeWindow}
         onOpacityChange=${setOpacity}
         onToggleSettings=${toggleSettings}
+        onToggleShortcuts=${toggleShortcuts}
+        onQuitSession=${quitSession}
         onQuit=${() => ipcRenderer.send('quit-app')}
       />
       <${SettingsPanel} store=${store} onClose=${closeSettings} />
+      <${ShortcutsModal} store=${store} onClose=${closeShortcuts} />
+      <${PaymentHistoryModal} store=${store} onClose=${closePaymentHistory} />
       <${StatusWarning} store=${store} />
       <${UpdateBanner} store=${store} onRestart=${() => ipcRenderer.send('restart-and-install')} />
       <${VoiceBar} store=${store} voiceController=${voiceControllerRef.current} />
-      <${Conversation} store=${store} containerRef=${conversationRef} />
+      <${Conversation} store=${store} containerRef=${conversationRef} onToggleListen=${() => voiceControllerRef.current.toggleListen()} onStartTrial=${startTrial} />
       <${InputArea} store=${store} inputRef=${inputRef} onSend=${sendMessage} />
     </div>
   `;
