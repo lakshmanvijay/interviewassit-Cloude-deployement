@@ -1,15 +1,16 @@
-const { ipcRenderer, shell } = require('electron');
+const { ipcRenderer } = require('electron');
 const { html } = require('../html');
 const { useStoreSlice } = require('../hooks');
 
 // Dropdown panel (toggled from the account avatar button in TitleBar) —
-// shows the signed-in user's details/resume/logout, plus the answer
-// language-level setting. No API key inputs — Cerebras/Deepgram keys live
-// server-side on the backend now, reached over WebSocket.
+// shows the signed-in user's details/logout, plus the answer language-level
+// setting. No API key inputs — Cerebras/Deepgram keys live server-side on
+// the backend now, reached over WebSocket.
 function SettingsPanel({ store, onClose }) {
   const open          = useStoreSlice(store, s => s.settingsOpen);
   const collapsed      = useStoreSlice(store, s => s.collapsed);
   const account        = useStoreSlice(store, s => s.account);
+  const creditBalance  = useStoreSlice(store, s => s.creditBalance);
   const proficiencyLevel = useStoreSlice(store, s => s.proficiencyLevel);
 
   if (!open || collapsed) return null;
@@ -21,10 +22,7 @@ function SettingsPanel({ store, onClose }) {
           <div class="settings-avatar">${account.name.charAt(0).toUpperCase()}</div>
           <div class="account-name">${account.name}</div>
           <div class="account-email">${account.email}</div>
-          <span class="account-plan">${account.credits != null ? `${account.credits} credits` : (account.plan || 'Free')}</span>
-          ${account.resume && html`
-            <a class="account-resume" onClick=${() => shell.openExternal(account.resume)}>View resume ↗</a>
-          `}
+          <span class="account-plan">${creditBalance ? `${creditBalance.totalMinutesAvailable} min` : (account.plan || 'Free')}</span>
           <button class="settings-ok-btn logout-btn" onClick=${() => ipcRenderer.send('logout')}>Logout</button>
         ` : html`
           <div class="account-name">Not signed in</div>
