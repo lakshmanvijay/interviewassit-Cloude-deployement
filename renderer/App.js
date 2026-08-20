@@ -129,7 +129,7 @@ function App({ store }) {
         // (reflow/scroll-anchoring), which would otherwise let the question
         // drift down out of the top spot over the course of a long answer.
         scrollQuestionIntoTop(userId);
-      }, 'cerebras');
+      }, 'cerebras', undefined, text);
       // Recorded so a later continuation can find this bubble/request again,
       // and so cancelInFlight() can abort this exact request by id.
       askStateRef.current[userId] = { assistantId, askId };

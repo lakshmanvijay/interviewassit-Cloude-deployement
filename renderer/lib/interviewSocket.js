@@ -133,7 +133,16 @@ function disconnect() {
 // instead of the regular text model. Vision requests can take longer than
 // a plain question (multiple images to tile/tokenize), hence the longer
 // timeout when images are present.
-async function askBackend(question, onDelta, provider, images) {
+//
+// `question` is the full text sent to the LLM — callers here pad it with
+// system-style instructions, resume context, and conversation history
+// before the real question (see App.js's ask() and screenAnalyze.js).
+// `displayQuestion`, if given, is the short human-readable question alone,
+// used by the backend for Interview History persistence instead of the
+// padded `question` blob — pass it whenever the caller has a clean short
+// version, so what shows up in history is the real question, not the
+// internal prompt.
+async function askBackend(question, onDelta, provider, images, displayQuestion) {
   await connect();
   if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error('Not connected');
 
@@ -150,6 +159,7 @@ async function askBackend(question, onDelta, provider, images) {
     pending.set(id, { resolve, reject, onDelta, acc: '', timeoutTimer });
 
     const payload = { type: 'question', id, question };
+    if (displayQuestion) payload.displayQuestion = displayQuestion;
     if (provider) payload.provider = provider;
     if (images && images.length) payload.images = images;
     ws.send(JSON.stringify(payload));
