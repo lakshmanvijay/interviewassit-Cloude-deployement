@@ -11,7 +11,7 @@ const VOICE_THRESHOLD  = 15;    // energy level above which we consider the user
 // flow — see onSpeechResumed — to recover, rather than the pause just being
 // absorbed silently). If real usage shows too many premature cutoffs, raise
 // these back up rather than pushing them even lower.
-const SILENCE_MS_SHORT = 600;   // silence after a long question  (≥2 s speech) → fire fast
+const SILENCE_MS_SHORT = 650;   // silence after a long question  (≥2 s speech) → fire fast
 const SILENCE_MS_LONG  = 1800;  // silence after a short fragment (<2 s speech) → small buffer
 const MIN_STT_INTERVAL_MS = 2500; // don't open more than one STT session every 3 seconds
 const NOISE_PHRASES = [

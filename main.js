@@ -396,6 +396,29 @@ function pauseLiveAssistSession(token) {
   return postJsonAuth(`${api.protocol}//${api.host}/api/sessions/pause`, token, {}, 10000);
 }
 
+// Starts the free 10-minute Live Assist trial — server-side gated by a
+// 1-minute cooldown since the last trial actually FINISHED (not since it
+// started, see endTrialSession below), so it can't be bypassed by clearing
+// the renderer's localStorage copy of trialUsedAt (that copy is just for
+// the countdown display). Spends no credit lot. Resolves { ok, status,
+// body } same shape as the two above — status 429 means the cooldown
+// hasn't elapsed yet, body.trialExpiresAt on success is when the free
+// window (questions let through free by the backend) runs out.
+function startTrialSession(token) {
+  const api = new URL(LOGIN_API_URL);
+  return postJsonAuth(`${api.protocol}//${api.host}/api/sessions/trial/start`, token, {}, 10000);
+}
+
+// Tells the backend the running free trial just finished (auto-timeout or
+// an early manual quit) — see App.js's quitSession(). Anchors the
+// 1-minute cooldown before the next trial to this actual completion
+// moment instead of to when the trial started. Fire-and-forget from the
+// caller's side (204, no meaningful body either way).
+function endTrialSession(token) {
+  const api = new URL(LOGIN_API_URL);
+  return postJsonAuth(`${api.protocol}//${api.host}/api/sessions/trial/end`, token, {}, 10000);
+}
+
 // CreditBalanceResponse: { totalMinutesAvailable, lots: [{ id, item,
 // minutesGranted, minutesRemaining, purchasedAt, activatedAt, expiresAt }] }
 // — the source of truth for "how much time is left" display, refreshed
@@ -490,6 +513,28 @@ function createOverlayWindow() {
   if (process.env.DEBUG_CONSOLE) {
     overlayWindow.webContents.on('console-message', (e, level, message, line, sourceId) => {
       console.log(`[renderer] ${message} (${sourceId}:${line})`);
+    });
+  }
+
+  // Lock DevTools out of packaged production builds — this is a stealth
+  // overlay app, so an end user popping the inspector open (and poking at
+  // the DOM/IPC/token) isn't something to allow by default the way it would
+  // be in a normal app. Two layers: block the keyboard shortcuts that would
+  // open it, and force-close it if it ever ends up open anyway (belt and
+  // suspenders against anything else that might trigger it later). Gated on
+  // app.isPackaged, not NODE_ENV, so `npm start` during development is
+  // unaffected — OPEN_DEVTOOLS above still works in a packaged build too,
+  // since that's an explicit opt-in, not an end user finding their own way in.
+  if (app.isPackaged) {
+    overlayWindow.webContents.on('before-input-event', (event, input) => {
+      const key = (input.key || '').toLowerCase();
+      const isF12 = key === 'f12';
+      const isCtrlShiftIJ = input.control && input.shift && (key === 'i' || key === 'j' || key === 'c');
+      const isCmdOptI = input.meta && input.alt && key === 'i'; // macOS equivalent
+      if (isF12 || isCtrlShiftIJ || isCmdOptI) event.preventDefault();
+    });
+    overlayWindow.webContents.on('devtools-opened', () => {
+      overlayWindow.webContents.closeDevTools();
     });
   }
 
@@ -731,6 +776,14 @@ function toggleOverlay() {
 // APP LIFECYCLE
 // ─────────────────────────────────────────────
 app.whenReady().then(() => {
+  // No native menu bar is used anywhere in this app (frame: false, custom
+  // tray context menu instead) — removing Electron's default application
+  // menu entirely also removes its built-in "Toggle Developer Tools" role,
+  // which otherwise keeps its Ctrl+Shift+I/F12 accelerators live even with
+  // no menu bar visible. Harmless in dev too, so this isn't gated on
+  // app.isPackaged like the devtools lockdown above.
+  Menu.setApplicationMenu(null);
+
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
     if (permission === 'media' || permission === 'audioCapture' || permission === 'microphone') {
       return callback(true);
@@ -967,6 +1020,36 @@ ipcMain.handle('pause-live-assist-session', async () => {
     return await pauseLiveAssistSession(sessionToken);
   } catch (e) {
     console.error('[sessions] pause-live-assist-session failed:', e.message);
+    return { ok: false, status: 0, body: { message: e.message } };
+  }
+});
+
+// Called from the renderer's "10-minute free trial" button (see App.js's
+// startTrial()). Same { ok, status, body } shape as the two handlers above
+// — status 429 means the 1-minute cooldown hasn't elapsed since the last
+// trial finished (checked server-side, so it can't be bypassed by clearing
+// localStorage), body.trialExpiresAt on success is when the free window
+// closes.
+ipcMain.handle('start-trial-session', async () => {
+  if (!sessionToken) return { ok: false, status: 0, body: { message: 'Not signed in' } };
+  try {
+    return await startTrialSession(sessionToken);
+  } catch (e) {
+    console.error('[sessions] start-trial-session failed:', e.message);
+    return { ok: false, status: 0, body: { message: e.message } };
+  }
+});
+
+// Called from the renderer's quitSession() when a free trial was running —
+// tells the backend the trial just finished, right now, so its 1-minute
+// cooldown counts from this moment rather than from when the trial started.
+// See App.js's quitSession() and endTrialSession() above.
+ipcMain.handle('end-trial-session', async () => {
+  if (!sessionToken) return { ok: false, status: 0, body: { message: 'Not signed in' } };
+  try {
+    return await endTrialSession(sessionToken);
+  } catch (e) {
+    console.error('[sessions] end-trial-session failed:', e.message);
     return { ok: false, status: 0, body: { message: e.message } };
   }
 });
