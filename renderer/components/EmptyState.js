@@ -1,49 +1,47 @@
 const { ipcRenderer, shell } = require('electron');
 const { html } = require('../html');
 const { useState, useEffect } = require('preact/hooks');
-const { useStoreSlice } = require('../hooks');
+const { useStoreSlice, useAssistCountdown } = require('../hooks');
 
-// Ticks store.assistExpiresAt (an ISO timestamp — InterviewSessionResponse's
-// assistExpiresAt, set once POST /api/sessions/start succeeds, see
-// startListening() below) down into an "Xh Ym left" label. null/past means
-// no active window, so the credits-only view shows instead.
-function useAssistCountdown(store) {
-  const expiresAtRaw = useStoreSlice(store, s => s.assistExpiresAt);
-  const [now, setNow] = useState(Date.now());
+const TRIAL_COOLDOWN_MS = 1 * 60 * 1000; // 1 minute — must match backend's TRIAL_COOLDOWN (InterviewSessionService), this is only the local display estimate
 
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 30000); // 30s is plenty for a minutes-granularity countdown
-    return () => clearInterval(t);
-  }, []);
-
-  if (!expiresAtRaw) return null;
-  const expiresAt = new Date(expiresAtRaw).getTime();
-  if (!expiresAt || expiresAt <= now) return null;
-
-  const msLeft = expiresAt - now;
-  const h = Math.floor(msLeft / 3600000);
-  const m = Math.floor((msLeft % 3600000) / 60000);
-  return { h, m, label: `${h}h ${m}m` };
-}
-
-const TRIAL_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
-
-// Ticks store.trialUsedAt (see startTrial() in App.js) down into cooldown
-// eligibility. trialUsedAt is persisted to localStorage there, so this
-// cooldown survives an app restart, not just a re-render.
+// Ticks store.trialUsedAt down into cooldown eligibility — this IS the
+// "when do I get another free trial" timer, rendered live on the trial
+// button below. trialUsedAt is set to the trial's actual completion time
+// (not when it started — see App.js's quitSession()), persisted to
+// localStorage there so this cooldown survives an app restart, not just a
+// re-render. Server-side is still the actual gate (see backend's
+// InterviewSessionService.startTrial/endTrial, 429 if too soon, also
+// counted from completion) — this is just the matching live countdown display.
 function useTrialCooldown(store) {
   const trialUsedAt = useStoreSlice(store, s => s.trialUsedAt);
   const [now, setNow] = useState(Date.now());
+  const readyAt = trialUsedAt ? trialUsedAt + TRIAL_COOLDOWN_MS : 0;
 
   useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 30000);
-    return () => clearInterval(t);
-  }, []);
+    if (now >= readyAt) return;
+    let timeoutId;
+    // Same self-rescheduling trick as hooks.js's useAssistCountdown: 30s
+    // ticks are plenty at first, switching to 1s once inside the last
+    // minute so the seconds count down smoothly instead of jumping.
+    function schedule() {
+      const msLeft = readyAt - Date.now();
+      const delay = msLeft <= 60000 ? 1000 : 30000;
+      timeoutId = setTimeout(() => { setNow(Date.now()); schedule(); }, delay);
+    }
+    schedule();
+    return () => clearTimeout(timeoutId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [readyAt]);
 
-  const readyAt = trialUsedAt ? trialUsedAt + TRIAL_COOLDOWN_MS : 0;
   if (now >= readyAt) return { eligible: true, remainingLabel: null };
 
-  const minsLeft = Math.ceil((readyAt - now) / 60000);
+  const msLeft = readyAt - now;
+  if (msLeft < 60000) {
+    const secsLeft = Math.max(0, Math.ceil(msLeft / 1000));
+    return { eligible: false, remainingLabel: `${secsLeft}s` };
+  }
+  const minsLeft = Math.ceil(msLeft / 60000);
   const h = Math.floor(minsLeft / 60);
   const m = minsLeft % 60;
   return { eligible: false, remainingLabel: h > 0 ? `${h}h ${m}m` : `${m}m` };
@@ -244,7 +242,7 @@ function EmptyState({ store, onToggleListen, onStartTrial }) {
             <div class="pass-card-row">
               <span class="pass-dot"></span> ACTIVE SESSION
             </div>
-            <div class="pass-timer">${assist.label} <span>left</span></div>
+            <div class="pass-timer ${assist.critical ? 'critical' : ''}">${assist.label} <span>left</span></div>
             <div class="pass-note">✓ No extra credit needed until this window ends.</div>
           </div>
         `}

@@ -2,6 +2,7 @@ const { ipcRenderer } = require('electron');
 const { html } = require('./html');
 const { useRef, useEffect } = require('preact/hooks');
 
+const { trialUsedAtKey } = require('./store');
 const { getSystemPrompt } = require('./lib/prompts');
 const { connect: connectInterviewSocket, disconnect: disconnectInterviewSocket, askBackend, cancelQuestion, CANCELLED_ERROR } = require('./lib/interviewSocket');
 const { screenAnalyze } = require('./lib/screenAnalyze');
@@ -278,8 +279,33 @@ function App({ store }) {
     clearTimeout(trialTimerRef.current);
     voiceControllerRef.current.stopListening();
     clearConversation();
-    store.setState({ sessionStarted: false, sessionStartError: null, assistExpiresAt: null });
+    // Captured before the setState below clears trialExpiresAt — this is
+    // the only way to tell, at this point, whether what's ending was a free
+    // trial (as opposed to a paid session, or nothing at all).
+    const wasTrialActive = !!store.getState().trialExpiresAt;
+    store.setState({ sessionStarted: false, sessionStartError: null, assistExpiresAt: null, trialExpiresAt: null });
 
+    if (wasTrialActive) {
+      // The post-trial cooldown counts from completion, not from when the
+      // trial started — whether it ran the full 10 minutes (auto-timeout)
+      // or was quit early. Re-anchor both the local display (trialUsedAt)
+      // and the server's authoritative copy (POST /api/sessions/trial/end)
+      // to right now. See InterviewSessionService.endTrial on the backend.
+      const endedAt = Date.now();
+      // Keyed per account (see store.js's trialUsedAtKey) — not a single
+      // shared key — so this cooldown display only ever follows the
+      // currently signed-in user, not whoever last ran a trial on this
+      // installed app.
+      const key = trialUsedAtKey(store.getState().account);
+      if (key) { try { localStorage.setItem(key, String(endedAt)); } catch (e) {} }
+      store.setState({ trialUsedAt: endedAt });
+      ipcRenderer.invoke('end-trial-session').catch(() => {});
+    }
+
+    // Still called even after a trial — recordQuestion() (backend) attaches
+    // any questions asked during the trial to a real InterviewSession row
+    // (for history), and this closes that row out properly. No credit lot
+    // is linked to it, so nothing gets billed either way.
     const result = await ipcRenderer.invoke('pause-live-assist-session');
     if (result.ok) {
       const balanceResult = await ipcRenderer.invoke('get-credit-balance');
@@ -287,22 +313,61 @@ function App({ store }) {
     }
   }
 
-  // Local-only 10-minute free trial — no POST /api/sessions/start, no
-  // assistExpiresAt from the backend. Auto-quits itself via the same
-  // quitSession() path once the 10 minutes are up. trialUsedAt is persisted
-  // to localStorage (not just store state) so the 1-hour cooldown before the
-  // next trial survives an app restart, not just this session.
-  function startTrial() {
+  // 10-minute free trial. No POST /api/sessions/start and no credit lot is
+  // ever touched — but the backend still needs to know a trial is running,
+  // because InterviewWebSocketHandler gates every asked question against
+  // real credits server-side (checkLiveAssistAccess), regardless of what
+  // this client thinks its own state is. So this calls POST
+  // /api/sessions/trial/start first: the backend stamps a trialStartedAt on
+  // the user and, for the next 10 minutes, waves questions through free —
+  // see InterviewSessionService.startTrial/isInTrialWindow. A 1-minute
+  // cooldown counted from actual completion (see quitSession() above, which
+  // re-anchors this once the trial ends) is enforced there too (429 if too
+  // soon), authoritatively — trialUsedAt/localStorage here are just for the
+  // client's own countdown display and are NOT what gates anything;
+  // clearing localStorage can't get around the server-side cooldown.
+  async function startTrial() {
+    store.setState({ sessionStartError: null });
+    let result;
+    try {
+      result = await ipcRenderer.invoke('start-trial-session');
+    } catch (err) {
+      // ipcRenderer.invoke() itself shouldn't reject (the main-process
+      // handler always resolves), but if it somehow does, catch it here
+      // rather than letting it become an unhandled rejection — see
+      // index.js's crash-resilience guards for why that matters.
+      warningRef.current.showOnScreen(`Couldn't start trial: ${err.message}`);
+      return;
+    }
+    if (!result.ok) {
+      const msg = (result.body && result.body.message) || `Couldn't start trial (status ${result.status})`;
+      warningRef.current.showOnScreen(msg);
+      return;
+    }
+
     const usedAt = Date.now();
-    try { localStorage.setItem('vijayamai_trialUsedAt', String(usedAt)); } catch (e) {}
-    store.setState({ trialUsedAt: usedAt, sessionStarted: true, sessionStartError: null });
+    // Keyed per account (see store.js's trialUsedAtKey) — see the matching
+    // write in quitSession() for why this can't be one shared key.
+    const usedAtKey = trialUsedAtKey(store.getState().account);
+    if (usedAtKey) { try { localStorage.setItem(usedAtKey, String(usedAt)); } catch (e) {} }
+    // trialExpiresAt drives TitleBar's in-session countdown badge (see
+    // hooks.js's useAssistCountdown(store, 'trialExpiresAt')) — without it
+    // the badge only ever reads assistExpiresAt (the paid-session field),
+    // which a trial never sets, so it silently showed nothing during one.
+    const trialExpiresAt = result.body && result.body.trialExpiresAt;
+    store.setState({ trialUsedAt: usedAt, trialExpiresAt, sessionStarted: true, sessionStartError: null });
     voiceControllerRef.current.toggleListen();
+
+    // Scheduled off the server's actual trialExpiresAt when present, rather
+    // than always assuming a full fresh 10 minutes from right now — keeps
+    // this in sync with the backend's own clock instead of drifting from it.
+    const msLeft = trialExpiresAt ? new Date(trialExpiresAt).getTime() - Date.now() : 10 * 60 * 1000;
 
     clearTimeout(trialTimerRef.current);
     trialTimerRef.current = setTimeout(() => {
       trialTimerRef.current = null;
       quitSession();
-    }, 10 * 60 * 1000);
+    }, Math.max(0, msLeft));
   }
 
   // Only the background panel fades with this — text/icons/borders are
@@ -358,6 +423,10 @@ function App({ store }) {
     store.setState({ paymentHistoryOpen: false });
   }
 
+  function toggleOpacity() {
+    store.setState(s => ({ opacityOpen: !s.opacityOpen }));
+  }
+
   useEffect(() => {
     // Apply the store's initial opacity to the background CSS var — nothing
     // did this before the slider was first touched.
@@ -366,11 +435,20 @@ function App({ store }) {
     const cleanupScroll = questionNavRef.current.attachScrollListener();
 
     const onDocMouseDown = e => {
-      if (!store.getState().settingsOpen) return;
-      const panel = document.getElementById('settings-panel');
-      const gearBtn = document.getElementById('settings-gear-btn');
-      if ((panel && panel.contains(e.target)) || (gearBtn && gearBtn.contains(e.target))) return;
-      store.setState({ settingsOpen: false });
+      if (store.getState().settingsOpen) {
+        const panel = document.getElementById('settings-panel');
+        const gearBtn = document.getElementById('settings-gear-btn');
+        if (!((panel && panel.contains(e.target)) || (gearBtn && gearBtn.contains(e.target)))) {
+          store.setState({ settingsOpen: false });
+        }
+      }
+      if (store.getState().opacityOpen) {
+        const popup = document.getElementById('opacity-popup');
+        const opacityBtn = document.getElementById('opacity-btn');
+        if (!((popup && popup.contains(e.target)) || (opacityBtn && opacityBtn.contains(e.target)))) {
+          store.setState({ opacityOpen: false });
+        }
+      }
     };
     document.addEventListener('mousedown', onDocMouseDown);
 
@@ -384,7 +462,21 @@ function App({ store }) {
       'nav-next-question':      () => questionNavRef.current.navigateQuestion(+1),
       'jump-to-first-question': () => questionNavRef.current.jumpToQuestion(0),
       'jump-to-last-question':  () => questionNavRef.current.jumpToQuestion(Infinity),
-      'account-received':       (_, account) => { store.setState({ account }); connectInterviewSocket().catch(() => {}); },
+      // Also re-hydrates trialUsedAt from THIS account's own scoped
+      // localStorage key (see store.js's trialUsedAtKey) rather than
+      // whatever the store already had — otherwise, on a shared machine,
+      // signing into account B right after account A had used the free
+      // trial would keep showing A's cooldown on B's screen (store.trialUsedAt
+      // starts at 0 on launch — see store.js — but a second account signing
+      // in without an app restart would still be carrying A's value forward
+      // without this).
+      'account-received':       (_, account) => {
+        const key = trialUsedAtKey(account);
+        let trialUsedAt = 0;
+        if (key) { try { trialUsedAt = Number(localStorage.getItem(key)) || 0; } catch (e) {} }
+        store.setState({ account, trialUsedAt });
+        connectInterviewSocket().catch(() => {});
+      },
       'resume-parsed':          (_, text) => store.setState({ resumeText: text }),
       'interview-settings-received': (_, settings) => store.setState({ interviewSettings: settings }),
       // CreditBalanceResponse, fetched at login/session-restore and after
@@ -394,11 +486,18 @@ function App({ store }) {
       // uploaded filename, see EmptyState.js's setup-screen Resume row.
       'resume-info-received':   (_, resume) => store.setState({ resumeInfo: resume }),
       // An already-active Live Assist session found at login/session-restore
-      // (GET /api/sessions/me) — skips straight past the pre-session screen
-      // so its countdown survives an app restart instead of only being known
-      // right after clicking "Start listening" in this same run.
-      'active-assist-session':  (_, expiresAt) => store.setState({ assistExpiresAt: expiresAt, sessionStarted: true }),
-      'logged-out':             () => { store.setState({ account: null, resumeText: '', interviewSettings: null, sessionStarted: false, assistExpiresAt: null, sessionStartError: null, paymentHistoryOpen: false, creditBalance: null, resumeInfo: null }); disconnectInterviewSocket(); },
+      // (GET /api/sessions/me) — its countdown survives an app restart
+      // instead of only being known right after clicking "Start listening"
+      // in this same run. Deliberately does NOT set sessionStarted: true —
+      // the app always opens to the welcome screen first; an active window
+      // just makes that screen show "Continue [ACTIVE]" with the real time
+      // left, rather than skipping straight past it into the input view.
+      'active-assist-session':  (_, expiresAt) => store.setState({ assistExpiresAt: expiresAt }),
+      // trialUsedAt reset to 0 here too (on top of being re-hydrated per
+      // account on the next 'account-received') so the brief logged-out
+      // window in between never shows a stale cooldown left over from
+      // whichever account was just signed out.
+      'logged-out':             () => { clearTimeout(trialTimerRef.current); store.setState({ account: null, resumeText: '', interviewSettings: null, sessionStarted: false, assistExpiresAt: null, trialExpiresAt: null, trialUsedAt: 0, sessionStartError: null, paymentHistoryOpen: false, creditBalance: null, resumeInfo: null }); disconnectInterviewSocket(); },
       'update-ready':           (_, { version }) => store.setState({ updateReady: true, updateVersion: version }),
     };
     Object.entries(listeners).forEach(([ch, fn]) => ipcRenderer.on(ch, fn));
@@ -429,6 +528,7 @@ function App({ store }) {
         onOpacityChange=${setOpacity}
         onToggleSettings=${toggleSettings}
         onToggleShortcuts=${toggleShortcuts}
+        onToggleOpacity=${toggleOpacity}
         onQuitSession=${quitSession}
         onQuit=${() => ipcRenderer.send('quit-app')}
       />

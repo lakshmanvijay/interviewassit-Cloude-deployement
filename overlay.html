@@ -97,16 +97,24 @@
   #minimize-btn:hover { background: rgba(255,95,114,.15); color: var(--danger); border-color: rgba(255,95,114,.3); }
   #close-btn { font-size: 12px; font-weight: 700; }
   #close-btn:hover { background: rgba(255,95,114,.15); color: var(--danger); border-color: rgba(255,95,114,.3); }
-  /* Opacity slider inline */
-  .opacity-wrap {
-    display: flex; align-items: center; gap: 4px;
-    border: 1px solid var(--border); border-radius: 6px;
-    padding: 0 6px; height: 24px; background: rgba(255,255,255,0.03);
+  /* Opacity popover — opened from the 👁 titlebar button (see OpacityPopup.js)
+     instead of the slider sitting inline in the titlebar all the time. */
+  .opacity-anchor { position: relative; display: flex; align-items: center; }
+  #opacity-popup {
+    position: absolute; top: 30px; right: 0; z-index: 20;
+    width: 150px; padding: 10px 12px;
+    background: #0d1117; border: 1px solid rgba(99,255,180,0.2);
+    border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,0.55);
+    display: flex; flex-direction: column; gap: 8px;
   }
-  .opacity-wrap span { font-size: 9px; color: var(--text-dimmer); user-select: none; }
+  .opacity-popup-header {
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 10px; color: var(--text-dim);
+  }
+  .opacity-value { font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
   #opacity-slider {
     -webkit-appearance: none; appearance: none;
-    width: 54px; height: 3px;
+    width: 100%; height: 3px;
     background: rgba(255,255,255,0.12); border-radius: 2px; outline: none; cursor: pointer;
   }
   #opacity-slider::-webkit-slider-thumb {
@@ -114,6 +122,18 @@
     width: 10px; height: 10px; border-radius: 50%;
     background: var(--accent); cursor: pointer;
     box-shadow: 0 0 4px rgba(99,255,180,0.5);
+  }
+  /* In-titlebar Live Assist countdown — visible for the whole session, not
+     just the pre-session welcome screen (see TitleBar.js/hooks.js's
+     useAssistCountdown). .critical kicks in for the last 5 minutes. */
+  .assist-timer {
+    font-size: 10px; font-weight: 700; color: var(--text-dim);
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+    padding: 0 2px;
+  }
+  .assist-timer.critical {
+    color: var(--danger);
+    animation: pulse 1.4s ease-in-out infinite;
   }
   #mic-btn.listening {
     border-color: rgba(255,95,114,.5); color: var(--live);
@@ -315,6 +335,7 @@
   }
   .pass-timer { font-size: 18px; font-weight: 800; color: var(--text); }
   .pass-timer span { font-size: 10px; font-weight: 500; color: var(--text-dim); }
+  .pass-timer.critical { color: var(--danger); }
   .pass-note { font-size: 9px; color: var(--text-dim); }
   .credits-row {
     width: 100%; display: flex; align-items: center; justify-content: space-between;
@@ -492,7 +513,12 @@
     border-radius: 3px; padding: 0 3px; color: #c3e88d;
   }
   .message-content pre {
-    background: #0d1117; border: 1px solid rgba(255,255,255,0.07);
+    /* rgba(..., var(--bg-alpha)) instead of a solid #0d1117 — the rest of
+       the panel already fades with the opacity slider (see #app above),
+       but this stayed a fully-opaque black slab regardless of that setting,
+       blocking the view of the screen behind it right where code answers
+       show up. Same dark tint, now actually see-through at low opacity. */
+    background: rgba(13, 17, 23, var(--bg-alpha)); border: 1px solid rgba(255,255,255,0.07);
     border-left: 3px solid #c792ea;
     border-radius: 7px; padding: 12px 14px; margin: 7px 0;
     overflow-x: auto; font-size: 13px; line-height: 1.6;
