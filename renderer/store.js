@@ -40,7 +40,7 @@ const store = createStore({
   collapsed: false,
   sendDisabled: false,
   capturingScreenshot: false,
-  opacity: 88,
+  opacity: 78,
   opacityOpen: false,  // toggled by the 👁 titlebar button — shows the opacity slider popover instead of it sitting inline all the time
   settingsOpen: false,
   account: null,   // AuthResponse: { id, name, email, plan, credits, creditsExpireAt, resume, avatar, provider, joinedAt } once received from the web app's login, or null

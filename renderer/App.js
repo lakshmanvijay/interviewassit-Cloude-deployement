@@ -547,6 +547,13 @@ function App({ store }) {
     };
     ipcRenderer.on('opacity-step', onOpacityStep);
 
+    // Tells main.js it's now safe to push account/session-restore state —
+    // see main.js's 'renderer-ready' handler for why this can't just rely on
+    // 'did-finish-load' alone (that can fire before the listeners just above
+    // are actually registered, silently dropping e.g. active-assist-session
+    // on some runs).
+    ipcRenderer.send('renderer-ready');
+
     return () => {
       cleanupScroll();
       Object.entries(listeners).forEach(([ch, fn]) => ipcRenderer.removeListener(ch, fn));

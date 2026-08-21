@@ -3,7 +3,7 @@ const { html } = require('../html');
 const { useState, useEffect } = require('preact/hooks');
 const { useStoreSlice, useAssistCountdown } = require('../hooks');
 
-const TRIAL_COOLDOWN_MS = 1 * 60 * 1000; // 1 minute — must match backend's TRIAL_COOLDOWN (InterviewSessionService), this is only the local display estimate
+const TRIAL_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes — must match backend's TRIAL_COOLDOWN (InterviewSessionService), this is only the local display estimate
 
 // Ticks store.trialUsedAt down into cooldown eligibility — this IS the
 // "when do I get another free trial" timer, rendered live on the trial
@@ -84,6 +84,16 @@ function capitalize(s) {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : '—';
 }
 
+// "8/22/2026, 11:30:20 PM" — matches the web app's absolute-time display for
+// the same field, shown alongside the "Xh Ym left" countdown so a user who
+// glances at this later (or across a time-zone gap) sees exactly when it
+// ends, not just how long was left at some earlier render.
+function formatExpiry(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? null : d.toLocaleString('en-US');
+}
+
 function EmptyState({ store, onToggleListen, onStartTrial }) {
   const account           = useStoreSlice(store, s => s.account);
   const sessionStarted    = useStoreSlice(store, s => s.sessionStarted);
@@ -93,6 +103,10 @@ function EmptyState({ store, onToggleListen, onStartTrial }) {
   const proficiencyLevel  = useStoreSlice(store, s => s.proficiencyLevel);
   const creditBalance     = useStoreSlice(store, s => s.creditBalance);
   const resumeInfo        = useStoreSlice(store, s => s.resumeInfo);
+  // Raw ISO value alongside the derived countdown (assist) below — needed to
+  // render the absolute "Expires 8/22/2026, 11:30:20 PM" line, which the
+  // countdown hook's {h, m, label, ...} shape doesn't carry.
+  const assistExpiresAt   = useStoreSlice(store, s => s.assistExpiresAt);
   const assist = useAssistCountdown(store);
   const trial = useTrialCooldown(store);
   const noCredits = hasNoCredits(creditBalance);
@@ -243,6 +257,7 @@ function EmptyState({ store, onToggleListen, onStartTrial }) {
               <span class="pass-dot"></span> ACTIVE SESSION
             </div>
             <div class="pass-timer ${assist.critical ? 'critical' : ''}">${assist.label} <span>left</span></div>
+            ${formatExpiry(assistExpiresAt) && html`<div class="pass-expiry">Expires ${formatExpiry(assistExpiresAt)}</div>`}
             <div class="pass-note">✓ No extra credit needed until this window ends.</div>
           </div>
         `}

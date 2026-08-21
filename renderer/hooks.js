@@ -56,6 +56,15 @@ function useAssistCountdown(store, field = 'assistExpiresAt') {
       const delay = msLeft <= 60000 ? 1000 : 30000;
       timeoutId = setTimeout(() => { setNow(Date.now()); schedule(); }, delay);
     }
+    // `now` was captured once at mount (useState(Date.now())) and this
+    // effect only re-runs when expiresAtRaw itself changes — i.e. whenever a
+    // trial/assist window actually starts. Without refreshing `now` here
+    // too, a component that mounted (e.g. TitleBar, present from app
+    // launch) minutes before the window started keeps showing that stale
+    // mount-time `now`, inflating the displayed remaining time by however
+    // long the app had been idle — a 10-minute trial started 2 minutes after
+    // launch would read "12m" until the first scheduled tick corrects it.
+    setNow(Date.now());
     schedule();
     return () => clearTimeout(timeoutId);
   }, [expiresAtRaw]);

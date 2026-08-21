@@ -955,6 +955,28 @@ app.on('window-all-closed', () => {
 // ─────────────────────────────────────────────
 // IPC HANDLERS
 // ─────────────────────────────────────────────
+// Fired by the renderer (App.js) right after it finishes registering its
+// ipcRenderer.on(...) listeners, not on a fixed delay — closes a real race
+// with the 'did-finish-load' pushes below. did-finish-load fires as soon as
+// the page's synchronous script + resources are done loading, but React's
+// useEffect (where those listeners get registered) is scheduled to run
+// after paint, asynchronously — so did-finish-load can and sometimes does
+// win the race, meaning notifyRenderer()/notifyAccountRenderer() fire while
+// nothing is listening yet. Electron's webContents.send has no queuing: a
+// message sent before any listener exists for that channel is just dropped,
+// not buffered. There's no separate re-fetch path for this data (unlike,
+// say, credit balance, which gets refreshed after every Activate/Pause), so
+// a dropped 'active-assist-session' push in particular silently stayed
+// missing all the way until the next full app restart — intermittently, only
+// on whichever runs lost the race. Re-sending here once listeners are
+// confirmed live is safe even on the runs that DID win the race, since both
+// functions only re-push whatever's already cached (idempotent no-ops if
+// nothing changed).
+ipcMain.on('renderer-ready', () => {
+  notifyRenderer();
+  notifyAccountRenderer();
+});
+
 ipcMain.on('toggle-overlay', () => toggleOverlay());
 
 ipcMain.on('quit-app', () => app.quit());
