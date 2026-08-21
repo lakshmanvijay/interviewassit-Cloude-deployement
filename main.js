@@ -419,6 +419,16 @@ function endTrialSession(token) {
   return postJsonAuth(`${api.protocol}//${api.host}/api/sessions/trial/end`, token, {}, 10000);
 }
 
+// Posts a post-session star rating (1-5) + optional freeform message — see
+// the renderer's FeedbackModal, shown from App.js's quitSession(). Same
+// host as LOGIN_API_URL. Resolves { ok, status, body } same shape as the
+// session endpoints above; a 400 means the rating was out of range (see
+// FeedbackService on the backend).
+function submitFeedback(token, payload) {
+  const api = new URL(LOGIN_API_URL);
+  return postJsonAuth(`${api.protocol}//${api.host}/api/feedback`, token, payload, 10000);
+}
+
 // CreditBalanceResponse: { totalMinutesAvailable, lots: [{ id, item,
 // minutesGranted, minutesRemaining, purchasedAt, activatedAt, expiresAt }] }
 // — the source of truth for "how much time is left" display, refreshed
@@ -1050,6 +1060,17 @@ ipcMain.handle('end-trial-session', async () => {
     return await endTrialSession(sessionToken);
   } catch (e) {
     console.error('[sessions] end-trial-session failed:', e.message);
+    return { ok: false, status: 0, body: { message: e.message } };
+  }
+});
+
+// Called from FeedbackModal's submit() — { rating, message }.
+ipcMain.handle('submit-feedback', async (event, payload) => {
+  if (!sessionToken) return { ok: false, status: 0, body: { message: 'Not signed in' } };
+  try {
+    return await submitFeedback(sessionToken, payload);
+  } catch (e) {
+    console.error('[feedback] submit-feedback failed:', e.message);
     return { ok: false, status: 0, body: { message: e.message } };
   }
 });

@@ -434,7 +434,12 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
       // silence/noise/too short — nothing real was ever asked, so just
       // drop the live bubble.
       console.log('[voice] transcript discarded as empty/noise:', JSON.stringify(text));
-      setVoiceStatus('capturing internal audio', 'live');
+      // Guarded — handleTranscript is reached via async hops (the silence
+      // timer → endUtterance → here), so the session can have already been
+      // quit/stopListening() called in between. Without this check, this
+      // would stomp stopListening()'s '● audio off' status back to
+      // "capturing internal audio" right after the session ended.
+      if (listening) setVoiceStatus('capturing internal audio', 'live');
       abandonLiveQuestion();
       return;
     }
@@ -460,7 +465,10 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
     // fresh id.
     const liveId = detachLiveQuestion();
     await onTranscript(combinedText, liveId, wasContinuation);
-    setVoiceStatus('capturing internal audio', 'live');
+    // Guarded for the same reason as the branch above — onTranscript() can
+    // take a while (network round trip), long enough for the session to
+    // have been quit and stopListening() already run in the meantime.
+    if (listening) setVoiceStatus('capturing internal audio', 'live');
   }
 
   return { toggleListen, stopListening, attachMeterEl, isListening: () => listening };

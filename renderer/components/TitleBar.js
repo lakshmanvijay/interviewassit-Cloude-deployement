@@ -11,19 +11,18 @@ function TitleBar({ store, onToggleListen, onCaptureScreenshot, onClear, onMinim
   const shortcutsOpen = useStoreSlice(store, s => s.shortcutsOpen);
   const sessionStarted = useStoreSlice(store, s => s.sessionStarted);
   const account       = useStoreSlice(store, s => s.account);
-  // Only the AI-answers page (conversation has at least one message) shows
-  // the timer — sessionStarted alone isn't enough, since it's also true on
-  // the "Ready." screen before anything's been asked yet (see
-  // Conversation.js: EmptyState renders whenever conversation is empty,
-  // regardless of sessionStarted).
-  const hasAnswers = useStoreSlice(store, s => s.conversation.length > 0);
   // Turns red (see .assist-timer.critical) in the last 5 minutes so running
   // out isn't a surprise mid-answer. A free trial never sets
   // assistExpiresAt (see App.js's startTrial()), so its own trialExpiresAt
-  // is checked too — at most one of the two is ever active.
+  // is checked too — at most one of the two is ever active. Shown as soon as
+  // the session starts (this whole block is already gated on sessionStarted
+  // below) rather than waiting for the first question to be asked — used to
+  // require conversation.length > 0 too, so the timer stayed invisible for
+  // however long someone sat on the "Ready." screen before asking anything,
+  // which is exactly when knowing the time left matters most.
   const assist = useAssistCountdown(store);
   const trial  = useAssistCountdown(store, 'trialExpiresAt');
-  const timer  = hasAnswers && (assist || trial);
+  const timer  = assist || trial;
 
   return html`
     <div id="titlebar">

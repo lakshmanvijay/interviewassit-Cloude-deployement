@@ -15,6 +15,7 @@ const { TitleBar } = require('./components/TitleBar');
 const { SettingsPanel } = require('./components/SettingsPanel');
 const { ShortcutsModal } = require('./components/ShortcutsModal');
 const { PaymentHistoryModal } = require('./components/PaymentHistoryModal');
+const { FeedbackModal } = require('./components/FeedbackModal');
 const { StatusWarning } = require('./components/StatusWarning');
 const { UpdateBanner } = require('./components/UpdateBanner');
 const { VoiceBar } = require('./components/VoiceBar');
@@ -283,7 +284,10 @@ function App({ store }) {
     // the only way to tell, at this point, whether what's ending was a free
     // trial (as opposed to a paid session, or nothing at all).
     const wasTrialActive = !!store.getState().trialExpiresAt;
-    store.setState({ sessionStarted: false, sessionStartError: null, assistExpiresAt: null, trialExpiresAt: null });
+    // feedbackOpen: true — prompts for a star rating right as the session
+    // ends (see FeedbackModal.js), while the interview is still fresh in
+    // mind, rather than leaving it to be volunteered unprompted.
+    store.setState({ sessionStarted: false, sessionStartError: null, assistExpiresAt: null, trialExpiresAt: null, feedbackOpen: true });
 
     if (wasTrialActive) {
       // The post-trial cooldown counts from completion, not from when the
@@ -423,6 +427,10 @@ function App({ store }) {
     store.setState({ paymentHistoryOpen: false });
   }
 
+  function closeFeedback() {
+    store.setState({ feedbackOpen: false });
+  }
+
   function toggleOpacity() {
     store.setState(s => ({ opacityOpen: !s.opacityOpen }));
   }
@@ -497,7 +505,7 @@ function App({ store }) {
       // account on the next 'account-received') so the brief logged-out
       // window in between never shows a stale cooldown left over from
       // whichever account was just signed out.
-      'logged-out':             () => { clearTimeout(trialTimerRef.current); store.setState({ account: null, resumeText: '', interviewSettings: null, sessionStarted: false, assistExpiresAt: null, trialExpiresAt: null, trialUsedAt: 0, sessionStartError: null, paymentHistoryOpen: false, creditBalance: null, resumeInfo: null }); disconnectInterviewSocket(); },
+      'logged-out':             () => { clearTimeout(trialTimerRef.current); store.setState({ account: null, resumeText: '', interviewSettings: null, sessionStarted: false, assistExpiresAt: null, trialExpiresAt: null, trialUsedAt: 0, sessionStartError: null, paymentHistoryOpen: false, feedbackOpen: false, creditBalance: null, resumeInfo: null }); disconnectInterviewSocket(); },
       'update-ready':           (_, { version }) => store.setState({ updateReady: true, updateVersion: version }),
     };
     Object.entries(listeners).forEach(([ch, fn]) => ipcRenderer.on(ch, fn));
@@ -535,6 +543,7 @@ function App({ store }) {
       <${SettingsPanel} store=${store} onClose=${closeSettings} />
       <${ShortcutsModal} store=${store} onClose=${closeShortcuts} />
       <${PaymentHistoryModal} store=${store} onClose=${closePaymentHistory} />
+      <${FeedbackModal} store=${store} onClose=${closeFeedback} />
       <${StatusWarning} store=${store} />
       <${UpdateBanner} store=${store} onRestart=${() => ipcRenderer.send('restart-and-install')} />
       <${VoiceBar} store=${store} voiceController=${voiceControllerRef.current} />
