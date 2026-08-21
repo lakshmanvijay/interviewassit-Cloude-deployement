@@ -13,11 +13,36 @@ const VOICE_THRESHOLD  = 15;    // energy level above which we consider the user
 // these back up rather than pushing them even lower.
 const SILENCE_MS_SHORT = 650;   // silence after a long question  (≥2 s speech) → fire fast
 const SILENCE_MS_LONG  = 1800;  // silence after a short fragment (<2 s speech) → small buffer
-const MIN_STT_INTERVAL_MS = 2500; // don't open more than one STT session every 3 seconds
+// Guards against opening a new backend STT connection for genuine VAD
+// flicker (energy oscillating right around VOICE_THRESHOLD re-triggers
+// isSpeaking several times in quick succession for what's really one sound).
+// Was previously measured from the PREVIOUS utterance's speech START
+// (lastSttRequestTs stamped in beginUtterance) with a 2500ms window — that
+// counted a real question's own speaking time + silence-wait against the
+// budget, so two genuinely separate questions asked back to back (extremely
+// common — "What's X? And when would you use it?") would often have their
+// SECOND utterance's STT session skipped outright ("Skipping extra STT
+// request"), silently dropping a real question with no answer ever
+// generated. Now measured from the previous session's CLOSE (set in
+// endUtterance below) instead, and shortened — true flicker re-triggers
+// within tens/hundreds of ms of each other, while a deliberate next
+// question is preceded by at least the silence-wait (650-1800ms) plus
+// however long the interviewer pauses before starting it.
+const MIN_STT_INTERVAL_MS = 800;
+// 'okay'/'okay.' used to be in this list and got discarded whenever the VAD
+// caught it as its own isolated fragment — but "Okay, so..."/"Okay, basically
+// what happens is..." is an extremely common way people transition mid-
+// explanation, not just a filler/acknowledgment. Discarding it (rather than
+// carrying it forward as a continuation) was silently swallowing real
+// content and — worse — burning through CONTINUATION_WINDOW_MS while doing
+// it, so by the time the substantive words after it arrived, too much time
+// had passed to still be recognized as a continuation of the question
+// already in progress, splitting one continuous answer into two separate
+// numbered questions. See isContinuation below.
 const NOISE_PHRASES = [
   'thank you', 'thanks', 'thank you.', 'thanks.', 'thank you!',
   'mm-hmm', 'mm-hmm.', 'mmm', 'mm', 'hmm', 'uh', 'um',
-  'you', 'you.', 'bye', 'bye.', 'okay', 'okay.',
+  'you', 'you.', 'bye', 'bye.',
   'subscribe', 'like and subscribe', 'see you next time',
   '[blank_audio]', '[silence]', '...',
 ];
@@ -85,7 +110,16 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
   // through. This time window catches that case regardless of how fast the
   // answer happened to generate.
   let lastQuestionAt = 0;
-  const CONTINUATION_WINDOW_MS = 4500;
+  // Widened from 4500 — this has to cover more than just "a normal pause
+  // mid-sentence": lastQuestionAt is only set once the PREVIOUS utterance's
+  // entire STT round trip finishes (see handleTranscript below), and in
+  // between, a short filler/transition fragment ("okay", "so basically") can
+  // eat a full silence-wait + its own STT open/finalize cycle before getting
+  // discarded as noise — all before the real next sentence even starts being
+  // recognized. That chain easily used up the old window on its own, so a
+  // continuous multi-sentence answer with any brief filler in the middle was
+  // getting split into two separate numbered questions instead of one.
+  const CONTINUATION_WINDOW_MS = 6000;
 
   // Current utterance's live STT session, if one is open. sttSocket.js
   // handles queuing audio sent before the backend acks "ready" internally,
@@ -131,20 +165,27 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
     });
   }
 
-  // Abandons the current live bubble — used when the utterance turns out to
-  // be empty/noise/errored, or listening is stopped mid-utterance — as
-  // opposed to detachLiveQuestion() below, used when it's being handed
-  // off/kept. For a brand-new (non-continuation) bubble this deletes it
-  // outright (it was never a real question). For a continuation, the bubble
-  // IS a real, already-asked question reused by id — deleting it would wipe
-  // it from history, so this reverts its content back to just the original
-  // base text instead, undoing the abandoned continuation attempt.
-  function abandonLiveQuestion() {
-    if (!liveMsgId) return;
-    const id = liveMsgId;
-    const base = continuationBase;
-    liveMsgId = null;
-    continuationBase = '';
+  // Abandons a live bubble — used when the utterance turns out to be
+  // empty/noise/errored, or listening is stopped mid-utterance — as opposed
+  // to detachLiveQuestion() below, used when it's being handed off/kept. For
+  // a brand-new (non-continuation) bubble this deletes it outright (it was
+  // never a real question). For a continuation, the bubble IS a real,
+  // already-asked question reused by id — deleting it would wipe it from
+  // history, so this reverts its content back to just the original base
+  // text instead, undoing the abandoned continuation attempt.
+  //
+  // Takes an explicit `id`/`base` (defaulting to the current shared
+  // liveMsgId/continuationBase, so every existing no-args call site keeps
+  // working unchanged) rather than always reading the shared state — see
+  // endUtterance() below: its call can resolve LATE, after a newer
+  // utterance has already moved liveMsgId on to its own bubble, and must
+  // still clean up the RIGHT (older) one rather than the new one. Only
+  // clears the shared liveMsgId/continuationBase if they still point at
+  // this same id, so a late call for an already-superseded utterance can't
+  // clobber the newer one's in-progress state.
+  function abandonLiveQuestion(id = liveMsgId, base = continuationBase) {
+    if (!id) return;
+    if (liveMsgId === id) { liveMsgId = null; continuationBase = ''; }
     if (base) {
       store.setState(s => ({ conversation: s.conversation.map(m => (m.id === id ? { ...m, content: base } : m)) }));
     } else {
@@ -155,14 +196,13 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
     }
   }
 
-  // Hands the live bubble's id off to the caller (App.js's ask(), to
-  // finalize/reuse it as the real submitted question) and resets liveMsgId +
-  // continuationBase so the *next* utterance is guaranteed to allocate a
-  // fresh id instead of touching this now-handed-off one.
-  function detachLiveQuestion() {
-    const id = liveMsgId;
-    liveMsgId = null;
-    continuationBase = '';
+  // Hands a live bubble's id off to the caller (App.js's ask(), to
+  // finalize/reuse it as the real submitted question). Takes an explicit
+  // `id` (defaulting to the current shared liveMsgId) for the same
+  // late-resolution reason as abandonLiveQuestion above — only clears the
+  // shared liveMsgId/continuationBase if they still point at this id.
+  function detachLiveQuestion(id = liveMsgId) {
+    if (liveMsgId === id) { liveMsgId = null; continuationBase = ''; }
     return id;
   }
 
@@ -280,11 +320,12 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
       // Rate-limited — skip opening a new backend connection for this
       // utterance (unlike a local recording, opening a live socket is a
       // real backend resource, so this is checked at speech-start now
-      // instead of after recording finishes).
+      // instead of after recording finishes). lastSttRequestTs is stamped
+      // when the PREVIOUS session closed (see endUtterance below), not when
+      // it opened — see MIN_STT_INTERVAL_MS's comment for why.
       showOnScreen('Skipping extra STT request to reduce traffic');
       return;
     }
-    lastSttRequestTs = now;
 
     console.log('[voice] utterance started, opening STT session');
     // Live captions: show the interviewer's words directly in the main
@@ -309,6 +350,22 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
   }
 
   async function endUtterance() {
+    // Captured now, synchronously, before any await — pins THIS utterance's
+    // finalize logic (here and in handleTranscript below) to the exact
+    // bubble/continuation-state that was live when its silence period
+    // ended, immune to a NEWER utterance moving the shared liveMsgId/
+    // continuationBase on while this one is still waiting on the STT server
+    // to finalize (session.finish() below is a real network round trip —
+    // easily slow enough for the interviewer to already be asking the next
+    // question by the time it resolves). Without this, handleTranscript
+    // would hand off/abandon whatever bubble HAPPENS to be current by then
+    // (the newer utterance's) instead of this one's own — leaving this
+    // utterance's bubble orphaned forever, stuck on its last placeholder
+    // text ("Transcribing…", visible permanently in the conversation as if
+    // it were a real asked question).
+    const utteranceLiveMsgId = liveMsgId;
+    const utteranceContinuationBase = continuationBase;
+
     const session = sttSession;
     sttSession = null;
 
@@ -322,24 +379,47 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
       // instead of being left stranded with nothing to replace it.
       console.log('[voice] endUtterance: no session was open');
       updateLiveTranscript('');
-      await handleTranscript('');
+      await handleTranscript('', utteranceLiveMsgId, utteranceContinuationBase);
       return;
     }
 
+    // Stamped here (a real session actually closing) rather than in the
+    // `!session` branch above (nothing closed — most often because THIS
+    // utterance was itself rate-limited) — resetting the clock on a no-op
+    // would just push the window out again and could rate-limit every
+    // subsequent utterance in a chain forever. See MIN_STT_INTERVAL_MS.
+    lastSttRequestTs = Date.now();
+
     console.log('[voice] utterance ended, finalizing STT session');
+    // Brackets the actual STT round trip (client → our backend → Deepgram →
+    // back), which is the one leg of "time from stop-speaking to answer
+    // rendering" that neither the fixed silence-wait log above nor the
+    // backend's own "First token in Xms" log (LLM-only, logged server-side)
+    // covers — isolating it here settles whether a slow answer is coming
+    // from STT finalize specifically vs. from the LLM/network leg after it.
+    const finalizeStart = performance.now();
     const { text, error } = await session.finish();
-    console.log('[voice] STT session result — text:', JSON.stringify(text), 'error:', error);
-    if (!listening) return;
+    console.log(`[voice] STT finalize took ${Math.round(performance.now() - finalizeStart)}ms — text:`, JSON.stringify(text), 'error:', error);
+    if (!listening) {
+      // Session was stopped while this was finalizing — stopListening()
+      // already abandoned whatever bubble was current AT THAT MOMENT, which
+      // may not be this utterance's own (a newer one could have taken over
+      // liveMsgId first). abandonLiveQuestion no-ops harmlessly if this one
+      // was already cleaned up, and — via its own liveMsgId===id check —
+      // can't clobber a newer utterance's state either way.
+      abandonLiveQuestion(utteranceLiveMsgId, utteranceContinuationBase);
+      return;
+    }
 
     if (error) {
       showOnScreen('STT error: ' + error);
       setVoiceStatus('capturing internal audio', 'live');
       updateLiveTranscript('');
-      await handleTranscript(''); // same fallback reasoning as above
+      await handleTranscript('', utteranceLiveMsgId, utteranceContinuationBase); // same fallback reasoning as above
       return;
     }
 
-    await handleTranscript(text);
+    await handleTranscript(text, utteranceLiveMsgId, utteranceContinuationBase);
   }
 
   function vadLoop(ts) {
@@ -415,6 +495,13 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
           silenceTimer = null;
           setVoiceStatus('capturing internal audio', 'live');
           showLiveQuestion('Transcribing…');
+          // Latency instrumentation — see endUtterance()'s own timing log for
+          // why this is split into two numbers: this is the FIXED wait
+          // (already known/tunable — SILENCE_MS_SHORT/LONG above), separate
+          // from the STT finalize round trip, which varies with network/
+          // Deepgram conditions and is the actual unknown in "why did this
+          // particular question feel slow".
+          console.log(`[voice] silence wait done (${waitMs}ms, spoke ${spokenMs}ms) — finalizing STT`);
           await endUtterance();
         }, waitMs);
       }
@@ -423,10 +510,17 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
     vadRafId = requestAnimationFrame(vadLoop);
   }
 
-  async function handleTranscript(rawText) {
+  // `targetLiveMsgId`/`targetContinuationBase` are the SPECIFIC bubble/
+  // continuation-state this utterance owned when its silence period ended
+  // — captured and passed in by endUtterance() rather than read from the
+  // shared liveMsgId/continuationBase here, because by the time this runs
+  // (after an STT network round trip) a newer utterance may have already
+  // moved those shared variables on to itself. Using them directly here
+  // would hand off/abandon the WRONG bubble. See endUtterance()'s comment.
+  async function handleTranscript(rawText, targetLiveMsgId, targetContinuationBase) {
     const text = (rawText || '').trim();
-    const wasContinuation = !!continuationBase;
-    const base = continuationBase;
+    const wasContinuation = !!targetContinuationBase;
+    const base = targetContinuationBase;
     const isNoiseOrEmpty = !text || NOISE_PHRASES.includes(text.toLowerCase()) || text.split(/\s+/).length < 3;
 
     if (isNoiseOrEmpty && !wasContinuation) {
@@ -440,7 +534,7 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
       // would stomp stopListening()'s '● audio off' status back to
       // "capturing internal audio" right after the session ended.
       if (listening) setVoiceStatus('capturing internal audio', 'live');
-      abandonLiveQuestion();
+      abandonLiveQuestion(targetLiveMsgId, base);
       return;
     }
 
@@ -458,12 +552,10 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
     // above — resets on every question (new or continued) so the window
     // always measures from the most recent one, not the very first.
     lastQuestionAt = Date.now();
-    // Hand the live bubble's id off rather than clearing it — App.js's
-    // ask() (when autoAsk is on) finalizes that exact same bubble in place
-    // instead of creating a second new one. detachLiveQuestion() also resets
-    // liveMsgId/continuationBase so the *next* utterance is guaranteed a
-    // fresh id.
-    const liveId = detachLiveQuestion();
+    // Hand this bubble's id off rather than clearing it — App.js's ask()
+    // (when autoAsk is on) finalizes that exact same bubble in place
+    // instead of creating a second new one.
+    const liveId = detachLiveQuestion(targetLiveMsgId);
     await onTranscript(combinedText, liveId, wasContinuation);
     // Guarded for the same reason as the branch above — onTranscript() can
     // take a while (network round trip), long enough for the session to

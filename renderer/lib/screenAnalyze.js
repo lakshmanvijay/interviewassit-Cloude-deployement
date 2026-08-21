@@ -25,10 +25,15 @@ function screenAnalyze(images, text, resumeText, candidateProfile, onChunk) {
       : 'Read the question or coding problem shown in the screenshot(s) and give a complete answer with code.'
   }`;
 
+  // displayQuestion is the short, human-readable question saved to Interview
+  // History — falls back to a generic label when there's no typed text
+  // (screenshot-only asks), instead of persisting the giant prompt above.
+  const displayQuestion = text || 'Screenshot question';
+
   // askBackend now resolves { id, promise } (the id lets ask() in App.js
   // cancel a question mid-flight for the voice continuation feature) —
   // screenshot questions don't need that, so just unwrap the promise.
-  return askBackend(question, onChunk, 'groq', capped).then(({ promise }) => promise);
+  return askBackend(question, onChunk, 'groq', capped, displayQuestion).then(({ promise }) => promise);
 }
 
 module.exports = { screenAnalyze };

@@ -94,8 +94,21 @@ function App({ store }) {
 
     const { mode, resumeText, proficiencyLevel, interviewSettings } = store.getState();
     const systemPrompt = getSystemPrompt(mode, resumeText, proficiencyLevel, interviewSettings);
+    // Capped per turn — priorHistory was folded in at full length, so one
+    // long previous answer (multi-paragraph, with a code block) could add
+    // several hundred extra tokens to EVERY question's prompt from then on,
+    // for context that's rarely needed in full — the LLM only needs enough
+    // of the prior turn to keep continuity, not a verbatim replay. Bigger
+    // prompt = more for the provider to prefill before it can start
+    // generating, which shows up directly as slower time-to-first-token.
+    const HISTORY_TURN_MAX_CHARS = 400;
     const historyText = priorHistory.length
-      ? '\n\nRECENT CONVERSATION:\n' + priorHistory.map(m => `${m.role === 'user' ? 'Q' : 'A'}: ${m.content}`).join('\n')
+      ? '\n\nRECENT CONVERSATION:\n' + priorHistory.map(m => {
+          const content = m.content.length > HISTORY_TURN_MAX_CHARS
+            ? m.content.slice(0, HISTORY_TURN_MAX_CHARS) + '…'
+            : m.content;
+          return `${m.role === 'user' ? 'Q' : 'A'}: ${content}`;
+        }).join('\n')
       : '';
     const question = `${systemPrompt}${historyText}\n\nNEW QUESTION:\n${text}`;
 
@@ -113,6 +126,14 @@ function App({ store }) {
     }
 
     let lastRenderAt = 0;
+    // Latency instrumentation — brackets the leg voice.js's own STT-finalize
+    // timing log can't see: from the moment we actually send the question
+    // over the wire to the first answer token rendered. Combined with the
+    // backend's own "First token in Xms" log (server-side, LLM+access-check
+    // only), this pins down whether a slow-feeling answer is network time,
+    // backend queueing, or the LLM itself.
+    const askSentAt = performance.now();
+    let firstTokenLogged = false;
     try {
       // Explicitly pinned to cerebras — it's the fast provider (500-2000+
       // tok/s on dedicated hardware vs ~20-80 tok/s for OpenAI/Anthropic).
@@ -121,6 +142,10 @@ function App({ store }) {
       // provider configured" incident). Remove this pin once the backend
       // default is confirmed fixed, if you'd rather not hardcode it here.
       const { id: askId, promise } = await askBackend(question, partial => {
+        if (!firstTokenLogged) {
+          firstTokenLogged = true;
+          console.log(`[ask] first token in ${Math.round(performance.now() - askSentAt)}ms`);
+        }
         const now = performance.now();
         if (now - lastRenderAt < 30) return;
         lastRenderAt = now;
@@ -131,7 +156,13 @@ function App({ store }) {
         // (reflow/scroll-anchoring), which would otherwise let the question
         // drift down out of the top spot over the course of a long answer.
         scrollQuestionIntoTop(userId);
-      }, 'cerebras');
+      // `text` (this ask() call's own param, the real short question — NOT
+      // `question` above, which is the padded system-prompt+history+text
+      // blob actually sent to the LLM) is passed as displayQuestion so the
+      // backend persists the real question to Interview History instead of
+      // that whole padded blob. See askBackend's displayQuestion param in
+      // interviewSocket.js.
+      }, 'cerebras', undefined, text);
       // Recorded so a later continuation can find this bubble/request again,
       // and so cancelInFlight() can abort this exact request by id.
       askStateRef.current[userId] = { assistantId, askId };
