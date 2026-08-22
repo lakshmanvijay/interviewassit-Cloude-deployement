@@ -342,7 +342,12 @@
     width: 100%; display: flex; align-items: center; justify-content: space-between;
     font-size: 9px; color: var(--text-dim);
   }
-  .credits-row a { color: var(--accent2); cursor: pointer; flex-shrink: 0; margin-left: 6px; }
+  /* margin-left: auto, not just justify-content: space-between on the row —
+     space-between only pushes this to the right edge when there's a sibling
+     to distribute space against. EmptyState.js now omits the balance <span>
+     entirely when the pass-card above already shows it, so this needs to
+     pin itself right on its own in that single-child case. */
+  .credits-row a { color: var(--accent2); cursor: pointer; flex-shrink: 0; margin-left: auto; }
   .credits-row a:hover { text-decoration: underline; }
   .session-error {
     width: 100%; font-size: 10px; line-height: 1.5; color: var(--danger);
@@ -479,6 +484,12 @@
     flex: 1; display: flex; flex-direction: column;
     align-items: center; justify-content: center;
     gap: 12px; padding: 20px;
+    /* min-height: 0 lets this flex child actually shrink below its content's
+       natural height (flex items default to min-height: auto, ignoring the
+       parent's fixed height) so overflow-y below can actually kick in —
+       without it, content taller than the window just got clipped by #app's
+       overflow: hidden at shorter window heights instead of scrolling. */
+    min-height: 0; overflow-y: auto;
   }
   .empty-icon { font-size: 32px; filter: grayscale(1); opacity: .5; }
   .empty-text { font-size: 11px; color: var(--text-dim); text-align: center; line-height: 1.6; }

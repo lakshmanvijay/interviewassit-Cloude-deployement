@@ -31,16 +31,14 @@ function useStoreSlice(store, selector, isEqual) {
   return slice;
 }
 
-// Ticks an ISO-timestamp store field down into an "Xh Ym left" label. Used
-// for both store.assistExpiresAt (a paid Live Assist window — set once POST
-// /api/sessions/start succeeds) and store.trialExpiresAt (a free trial —
-// set once POST /api/sessions/trial/start succeeds, see App.js's
-// startTrial()); pass `field` to pick which. null/past means no active
-// window. Shared by EmptyState.js (pre-session countdown card) and
-// TitleBar.js (the in-session timer badge, which turns red in the last 5
-// minutes — see overlay.html's .assist-timer.critical).
-function useAssistCountdown(store, field = 'assistExpiresAt') {
-  const expiresAtRaw = useStoreSlice(store, s => s[field]);
+// Ticks a raw ISO-timestamp value down into an "Xh Ym left" label. null/past
+// means no active window. This is the shared core — most callers go through
+// useAssistCountdown below (which pulls the timestamp out of a store field),
+// but EmptyState.js's ACTIVE SESSION card needs to drive the same countdown
+// off a value computed from creditBalance.lots instead (see its own
+// comment), which isn't a single store field, hence this taking the raw
+// value directly rather than a (store, field) pair.
+function useExpiryCountdown(expiresAtRaw) {
   const [now, setNow] = useState(Date.now());
 
   useEffect(() => {
@@ -87,4 +85,16 @@ function useAssistCountdown(store, field = 'assistExpiresAt') {
   return { h, m, totalMinutes, totalSeconds, underOneMinute, label: `${h}h ${m}m`, critical: h === 0 && m <= 5 };
 }
 
-module.exports = { useStoreSlice, useAssistCountdown };
+// Store-field-backed wrapper around useExpiryCountdown — used for both
+// store.assistExpiresAt (a paid Live Assist window — set once POST
+// /api/sessions/start succeeds) and store.trialExpiresAt (a free trial —
+// set once POST /api/sessions/trial/start succeeds, see App.js's
+// startTrial()); pass `field` to pick which. Shared by TitleBar.js (the
+// in-session timer badge, which turns red in the last 5 minutes — see
+// overlay.html's .assist-timer.critical) and, for the trial field, EmptyState.js.
+function useAssistCountdown(store, field = 'assistExpiresAt') {
+  const expiresAtRaw = useStoreSlice(store, s => s[field]);
+  return useExpiryCountdown(expiresAtRaw);
+}
+
+module.exports = { useStoreSlice, useAssistCountdown, useExpiryCountdown };

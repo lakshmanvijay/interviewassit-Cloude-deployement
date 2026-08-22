@@ -515,6 +515,16 @@ function App({ store }) {
         if (key) { try { trialUsedAt = Number(localStorage.getItem(key)) || 0; } catch (e) {} }
         store.setState({ account, trialUsedAt });
         connectInterviewSocket().catch(() => {});
+        // Pull-based fallback for the ACTIVE SESSION restore, on top of the
+        // 'active-assist-session' push below — see main.js's
+        // get-active-assist-session for why the push alone wasn't fully
+        // reliable. Safe to fire every time 'account-received' does (not
+        // just once at cold start): a plain re-fetch, idempotent, and by
+        // definition sessionToken is already set on the main-process side
+        // once this event exists at all.
+        ipcRenderer.invoke('get-active-assist-session')
+          .then(expiresAt => { if (expiresAt) store.setState({ assistExpiresAt: expiresAt }); })
+          .catch(() => {});
       },
       'resume-parsed':          (_, text) => store.setState({ resumeText: text }),
       'interview-settings-received': (_, settings) => store.setState({ interviewSettings: settings }),

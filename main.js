@@ -493,6 +493,11 @@ function createOverlayWindow() {
   overlayWindow = new BrowserWindow({
     width: 528, // 480 + ~half inch (48px @ 96dpi)
     height: 640,
+    // Floor below which the welcome screen's cards/rows start clipping or
+    // overlapping instead of just looking cozy — resizable stays true, but
+    // nothing stopped it being dragged smaller than its own content without these.
+    minWidth: 380,
+    minHeight: 480,
     x: width - 548, // keeps the same 20px right-edge margin as before
     y: 40,
     frame: false,
@@ -1040,6 +1045,31 @@ ipcMain.handle('start-live-assist-session', async () => {
   } catch (e) {
     console.error('[sessions] start-live-assist-session failed:', e.message);
     return { ok: false, status: 0, body: { message: e.message } };
+  }
+});
+
+// Pull-based counterpart to the 'active-assist-session' push above (fired on
+// 'did-finish-load' / 'renderer-ready') — see App.js's 'account-received'
+// handler. The push relies on the renderer already having an
+// ipcRenderer.on('active-assist-session', ...) listener registered at the
+// exact moment main.js decides to send; renderer-ready closed most of that
+// race but didn't fully eliminate it. invoke/handle has no equivalent
+// failure mode: it's a direct request/response over its own reply channel,
+// so it can't be silently dropped the way a push into a not-yet-registered
+// listener can. Hits the backend fresh each call rather than trusting the
+// pendingActiveAssistExpiresAt cache, so it's also immune to that cache
+// still being null because fetchActiveSessions hadn't resolved yet.
+ipcMain.handle('get-active-assist-session', async () => {
+  if (!sessionToken) return null;
+  try {
+    const sessions = await fetchActiveSessions(sessionToken);
+    const active = (sessions || []).find(s =>
+      s.sessionType === 'Live Assist' && s.assistExpiresAt && new Date(s.assistExpiresAt).getTime() > Date.now()
+    );
+    return active ? active.assistExpiresAt : null;
+  } catch (e) {
+    console.error('[sessions] get-active-assist-session failed:', e.message);
+    return null;
   }
 });
 
