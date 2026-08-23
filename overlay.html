@@ -459,8 +459,25 @@
     position: absolute; top: 10px; right: 12px;
     font-size: 9px; color: var(--accent); font-weight: 600;
   }
-  .setup-back { font-size: 9.5px; color: var(--text-dim); cursor: pointer; margin-top: -2px; }
-  .setup-back:hover { color: var(--text); }
+  .setup-back {
+    align-self: flex-start;
+    display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+    min-height: 28px; box-sizing: border-box;
+    font-family: var(--sans); font-size: 10.5px; font-weight: 600;
+    color: var(--text-dim); background: rgba(255,255,255,0.05);
+    border: 1px solid var(--border); border-radius: 20px;
+    padding: 5px 12px 5px 9px; margin-top: -2px;
+    cursor: pointer; transition: all .15s;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+  }
+  .setup-back-icon { flex-shrink: 0; display: block; transition: transform .15s; }
+  .setup-back:hover {
+    color: var(--text); background: rgba(255,255,255,0.09);
+    border-color: rgba(255,255,255,0.18);
+  }
+  .setup-back:hover .setup-back-icon { transform: translateX(-2px); }
+  .setup-back:active { transform: scale(.96); }
+  .setup-back:focus-visible { outline: 2px solid var(--accent2); outline-offset: 2px; }
 
   .trial-btn {
     width: 100%; text-align: center; cursor: pointer;

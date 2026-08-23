@@ -1,6 +1,13 @@
 const { ipcRenderer } = require('electron');
+const { pathToFileURL } = require('url');
+const path = require('path');
 const { connectSttSession } = require('./sttSocket');
 const { scrollElIntoTop } = require('./scroll');
+
+// AudioWorklet modules load by URL, same-origin rules apply even under
+// file:// — pathToFileURL handles the backslash/drive-letter conversion
+// Windows paths need that a hand-built 'file://' + __dirname string wouldn't.
+const VAD_WORKLET_URL = pathToFileURL(path.join(__dirname, 'vadProcessor.worklet.js')).href;
 
 const VOICE_THRESHOLD  = 15;
 const SILENCE_MS_SHORT = 650;
@@ -148,7 +155,7 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
       listening = true;
       store.setState({ listening: true });
       setVoiceStatus('capturing internal audio', 'live');
-      startVAD(stream);
+      await startVAD(stream);
 
     } catch (err) {
       setVoiceStatus('Capture failed: ' + err.message.slice(0, 45), 'err');
@@ -167,7 +174,7 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
 
     if (procNode) {
       try { procNode.disconnect(); } catch (e) {}
-      procNode.onaudioprocess = null;
+      procNode.port.onmessage = null;
       procNode = null;
     }
     if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
@@ -179,7 +186,16 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
     setVadMeter(0);
   }
 
-  function startVAD(stream) {
+  // Was a ScriptProcessorNode — confirmed (Playwright repro + minidump
+  // analysis: STATUS_ACCESS_VIOLATION inside electron.exe, isolated by
+  // testing the analyser alone vs. the full graph) to reliably crash the
+  // renderer outright a few seconds into every session, on machines where
+  // DXGI desktop duplication isn't available so Chromium falls back to a
+  // less-tested capture path. AudioWorkletNode is the modern replacement —
+  // runs on the dedicated audio render thread via a separate module file
+  // (vadProcessor.worklet.js) instead of ScriptProcessorNode's deprecated
+  // main-thread callback machinery — and doesn't hit this crash.
+  async function startVAD(stream) {
     micStream    = stream;
     audioCtx     = new AudioContext();
     analyserNode = audioCtx.createAnalyser();
@@ -192,17 +208,32 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
     vadLo = Math.max(0, Math.floor(300  / binHz));
     vadHi = Math.min(vadFreqBuf.length - 1, Math.ceil(3400 / binHz));
 
-    procNode = audioCtx.createScriptProcessor(4096, 1, 1);
+    await audioCtx.audioWorklet.addModule(VAD_WORKLET_URL);
+    procNode = new AudioWorkletNode(audioCtx, 'vad-processor', {
+      numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1,
+      processorOptions: { bufferSize: 4096 }
+    });
     source.connect(procNode);
-    procNode.connect(audioCtx.destination);
-    procNode.onaudioprocess = onAudioProcess;
+    // Zero-gain — keeps this node part of the active render graph (reaching
+    // destination) without the captured desktop audio actually being
+    // audible, unlike the old ScriptProcessorNode which connected straight
+    // to destination at full volume (a real, if secondary, feedback bug).
+    const silentGain = audioCtx.createGain();
+    silentGain.gain.value = 0;
+    procNode.connect(silentGain);
+    silentGain.connect(audioCtx.destination);
+    procNode.port.onmessage = e => onAudioProcess(e.data);
 
     vadRafId = requestAnimationFrame(vadLoop);
   }
 
-  function onAudioProcess(e) {
+  // `float32` is one full render-quantum-accumulated buffer (bufferSize
+  // samples, see vadProcessor.worklet.js) posted from the AudioWorklet
+  // thread — same shape onAudioProcess always worked with (previously
+  // e.inputBuffer.getChannelData(0) from a ScriptProcessorNode callback).
+  function onAudioProcess(float32) {
     if (!isSpeaking || !sttSession) return;
-    const pcm16 = downsampleTo16kPCM16(e.inputBuffer.getChannelData(0), audioCtx.sampleRate);
+    const pcm16 = downsampleTo16kPCM16(float32, audioCtx.sampleRate);
     sttSession.sendAudio(pcm16.buffer);
   }
 

@@ -1,10 +1,21 @@
-const { app, BrowserWindow, globalShortcut, ipcMain, screen, Tray, Menu, nativeImage, session, desktopCapturer, shell, safeStorage, powerMonitor } = require('electron');
+const { app, BrowserWindow, globalShortcut, ipcMain, screen, Tray, Menu, nativeImage, session, desktopCapturer, shell, safeStorage, powerMonitor, crashReporter } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const log = require('electron-log');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
+
+// Local-only minidumps (uploadToServer: false, no submitURL needed) — the
+// overlay renderer has been observed crashing outright (webContents'
+// 'render-process-gone' fires with reason:'crashed', see main.log) right as
+// a Live Assist session starts, most likely from the desktop-audio+video
+// getUserMedia() capture in voice.js. Electron/Chromium normally only
+// writes a real stack-trace-bearing minidump when this is enabled —
+// without it all we get is the generic reason string, no way to see WHERE
+// in Chromium it actually faulted. Dumps land in
+// app.getPath('crashDumps') (%APPDATA%/<app>/Crash Dumps on Windows).
+crashReporter.start({ uploadToServer: false, compress: true });
 
 // ── CRASH RESILIENCE ───────────────────────────────
 // There's exactly one main process for the whole app — an uncaught
@@ -104,6 +115,16 @@ if (!gotSingleInstanceLock) {
   app.on('second-instance', (event, commandLine) => {
     if (overlayWindow) {
       if (overlayWindow.isMinimized()) overlayWindow.restore();
+      // A previous run that got hidden (Ctrl+Shift+H, tray toggle, or
+      // Alt+F4 — all intercepted into hide() rather than a real quit, see
+      // the window's own 'close' handler) leaves the process alive with
+      // isOverlayVisible false. Launching the app again then just hits this
+      // single-instance lock and re-activates that SAME hidden instance —
+      // .focus() alone can't make a hidden window visible, so without this
+      // it looked like "I started the app and nothing showed up" while the
+      // process was actually already running fine in the background the
+      // whole time.
+      if (!isOverlayVisible) { overlayWindow.show(); isOverlayVisible = true; }
       overlayWindow.focus();
     }
     const url = commandLine.find(arg => arg.startsWith(`${PROTOCOL}://`));
@@ -128,6 +149,20 @@ let isOverlayVisible = true;
 // below) — lets the window's own 'close' handler tell an OS-level close
 // signal (Alt+F4, etc.) apart from an intentional app.quit() call.
 let isQuitting = false;
+
+// Set by the 'render-process-gone' handler in createOverlayWindow() when the
+// overlay renderer crashes outright — CONFIRMED, not speculative: starting a
+// Live Assist session (trial or paid — both go through voice.js's
+// toggleListen(), which calls getUserMedia({chromeMediaSource:'desktop',...})
+// for internal-audio capture) reliably crashes this renderer's webContents
+// within ~4 seconds on this machine (verified via a Playwright-driven test:
+// webContents.isCrashed() flips true at t+4s, BrowserWindow itself stays
+// non-destroyed and reports visible:true throughout, so nothing else in the
+// app ever notices — reads to the user as the window just going dead/blank/
+// gone while the process lingers). Tells window-all-closed below to
+// recreate the window instead of quitting the whole app out from under the
+// user over one crashed renderer.
+let recreateAfterCrash = false;
 
 // Every call site that pings the renderer used to just check `if
 // (overlayWindow)` — but that only proves the JS reference is non-null, not
@@ -329,7 +364,7 @@ function fetchPaymentHistory(token) {
 // already-active Live Assist session (assistExpiresAt still in the future)
 // so its countdown survives an app restart instead of only being known
 // right after clicking "Start listening" this same run.
-function fetchveSessions(token) {
+function fetchActiveSessions(token) {
   const api = new URL(LOGIN_API_URL);
   return fetchJsonAuth(`${api.protocol}//${api.host}/api/sessions/me`, token, 8000, 'Sessions fetch');
 }
@@ -583,6 +618,17 @@ function createOverlayWindow() {
 
   overlayWindow.on('closed', () => {
     overlayWindow = null;
+  });
+
+  // See recreateAfterCrash's own comment above — this is the confirmed
+  // fix for the "app closes/hides the instant a session starts" reports.
+  // A genuine renderer crash (as opposed to a normal close, which is
+  // intercepted above into hide()) destroys this window out from under us.
+  // Logged via electron-log so the crash reason survives into main.log.
+  overlayWindow.webContents.on('render-process-gone', (_event, details) => {
+    if (isQuitting) return;
+    log.error('[fatal] overlay renderer process gone:', details && details.reason);
+    recreateAfterCrash = true;
   });
 
   // Block native minimize — with skipTaskbar:true the window would disappear
@@ -961,7 +1007,19 @@ app.on('will-quit', () => {
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
+  if (process.platform === 'darwin') return;
+  // Normal close is intercepted into hide() (see the window's own 'close'
+  // handler), so the only way this legitimately fires with recreateAfterCrash
+  // still true is the renderer having actually crashed (see
+  // 'render-process-gone' above, and recreateAfterCrash's own comment) —
+  // recreate instead of quitting the whole app (tray included) over one
+  // crashed window.
+  if (recreateAfterCrash) {
+    recreateAfterCrash = false;
+    createOverlayWindow();
+    return;
+  }
+  app.quit();
 });
 
 // ─────────────────────────────────────────────

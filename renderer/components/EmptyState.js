@@ -277,7 +277,10 @@ function EmptyState({ store, onToggleListen, onStartTrial }) {
           </button>
         `}
 
-        <a class="setup-back" onClick=${() => setShowSetup(false)}>‹ Back</a>
+        <button type="button" class="setup-back" onClick=${() => setShowSetup(false)}>
+          <svg class="setup-back-icon" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+          Back
+        </button>
       ` : !sessionStarted ? html`
         <!-- ── LOGGED IN, PRE-SESSION ── -->
         <div class="welcome-title">Welcome back, ${account.name}</div>
@@ -326,10 +329,6 @@ function EmptyState({ store, onToggleListen, onStartTrial }) {
              (startListening()/startTrial() both call onToggleListen()), so
              there's no "hit the mic" instruction needed here anymore. ── -->
         <div class="empty-text">Ready.</div>
-      `}
-
-      ${account && html`
-        <button class="login-btn logout-btn" onClick=${() => ipcRenderer.send('logout')}>Logout</button>
       `}
     </div>
   `;
