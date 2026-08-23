@@ -396,8 +396,15 @@
   }
   .feedback-textarea::placeholder { color: var(--text-dimmer); }
   .feedback-textarea:focus { border-color: rgba(99,255,180,0.3); }
+  /* Was .feedback-ons — a typo that never matched FeedbackModal.js's actual
+     class="feedback-actions", so this row (the "Maybe later" link +
+     "Submit feedback" button) never got flex layout at all: it fell back to
+     default block flow, an inline <a> stacked oddly against a block
+     <button> with no spacing/alignment, which is what read as
+     "not responsive". */
   .feedback-actions {
     display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    flex-wrap: wrap;
   }
   .feedback-submit-btn { width: auto; margin-top: 0; padding: 8px 18px; font-size: 11px; }
   .feedback-thanks {

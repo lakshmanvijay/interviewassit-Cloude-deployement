@@ -235,7 +235,7 @@ function EmptyState({ store, onToggleListen, onStartTrial }) {
 
         <div class="setup-section-label">YOUR SESSION</div>
 
-        ${sessionStartError === 'no-credits' || (noCredits && !assist) ? html`
+        ${sessionStartError === 'no-credits' || (noCredits && !windowTimer) ? html`
           <div class="session-error no-credits">
             You're out of credits. Buy more to start a Live Assist session.
             <a onClick=${() => shell.openExternal('https://vijayamai.com/credits')}>Buy credits ↗</a>
@@ -243,27 +243,35 @@ function EmptyState({ store, onToggleListen, onStartTrial }) {
         ` : sessionStartError ? html`
           <div class="session-error">${sessionStartError}</div>
         ` : html`
+          <!-- windowTimer, not assist — assist only reflects a currently
+               *open* session row (store.assistExpiresAt), so right after
+               buying/activating credit but before any session row happens
+               to be open again, this kept showing "Starts a new 1-hour
+               session" / "Uses 1 credit" even though continuing would
+               actually reuse the still-active lot for free. windowTimer
+               falls back to that lot (creditBalance.lots via
+               soonestActiveLot) whenever no session row is open — same
+               value the welcome screen's ACTIVE SESSION card already uses. -->
           <button class="session-card" disabled=${startingSession} onClick=${startListening}>
             <div class="session-card-main">
               <span class="session-card-title">${startingSession ? 'Starting…' : 'Continue'}</span>
-              ${assist && html`<span class="session-card-badge">ACTIVE</span>`}
+              ${windowTimer && html`<span class="session-card-badge">ACTIVE</span>`}
             </div>
             <div class="session-card-sub">
-              ${assist ? `Your session is live — ${assist.label} left.` : 'Starts a new 1-hour session.'}
+              ${windowTimer ? `Continuing reuses your active window — ${windowTimer.fullLabel} left.` : 'Starts a new 1-hour session.'}
             </div>
-            <span class="session-card-credit">✓ ${assist ? 'No credit used' : 'Uses 1 credit'}</span>
+            <span class="session-card-credit">✓ ${windowTimer ? 'No credit used' : 'Uses 1 credit'}</span>
           </button>
         `}
 
         <!-- Free trial is only for someone with nothing else to fall back on: hidden the moment
-             they have an active paid window (assist) OR any usable credit lot at all (noCredits is
-             false — see hasNoCredits(), which counts dormant/unactivated lots too, not just an
-             already-open window), even if that lot hasn't been activated yet. Previously this only
-             checked !assist, so a user sitting on a still-unused credit lot (bought but never
-             started) could see and use the free trial anyway, which isn't the intent — the trial is
-             meant strictly for users with zero credits and no active window, not a bonus on top of
-             paid credits. -->
-        ${!assist && noCredits && html`
+             they have an active paid window (windowTimer — an open session row OR an already-
+             activated credit lot with time left, see its own comment above) OR any usable credit
+             lot at all (noCredits is false — see hasNoCredits(), which counts dormant/unactivated
+             lots too, not just an already-active one), even if that lot hasn't been activated yet.
+             The trial is meant strictly for users with zero credits and no active window, not a
+             bonus on top of paid credits. -->
+        ${!windowTimer && noCredits && html`
           <button class="trial-btn" disabled=${!trial.eligible} onClick=${onStartTrial}>
             <span>🎁</span> ${trial.eligible ? '10-minute free trial' : `Free trial available in ${trial.remainingLabel}`}
           </button>
@@ -282,7 +290,10 @@ function EmptyState({ store, onToggleListen, onStartTrial }) {
             <div class="pass-card-row">
               <span class="pass-dot"></span> ACTIVE SESSION
             </div>
-            <div class="pass-timer ${windowTimer.critical ? 'critical' : ''}">${windowTimer.label} <span>left</span></div>
+            <!-- fullLabel switches format at the 24h mark: "Xd Yh" once
+                 there's more than a day left, "Xh Ym Zs" (live seconds)
+                 once under 24h — see hooks.js's useExpiryCountdown. -->
+            <div class="pass-timer ${windowTimer.critical ? 'critical' : ''}">${windowTimer.fullLabel} <span>left</span></div>
             ${formatExpiry(windowExpiresAt) && html`<div class="pass-expiry">Expires ${formatExpiry(windowExpiresAt)}</div>`}
             <!-- Same big lettering as the window countdown above (.pass-timer)
                  rather than the small credits-row text — the window

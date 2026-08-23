@@ -329,7 +329,7 @@ function fetchPaymentHistory(token) {
 // already-active Live Assist session (assistExpiresAt still in the future)
 // so its countdown survives an app restart instead of only being known
 // right after clicking "Start listening" this same run.
-function fetchActiveSessions(token) {
+function fetchveSessions(token) {
   const api = new URL(LOGIN_API_URL);
   return fetchJsonAuth(`${api.protocol}//${api.host}/api/sessions/me`, token, 8000, 'Sessions fetch');
 }
@@ -487,15 +487,22 @@ async function parseResume(url) {
 // This window is visible on YOUR screen but
 // EXCLUDED from any screen capture / share.
 // ─────────────────────────────────────────────
+// Floor below which the welcome screen's cards/rows start clipping or
+// overlapping instead of just looking cozy. Applied as the BrowserWindow's
+// own minWidth/minHeight below AND re-applied (capped) on every
+// 'resize-overlay' call — see that handler for why: setting it once at
+// construction also silently clamped the minimize/collapse button's resize
+// down to COLLAPSED_HEIGHT (44px), since 44 < 480, so collapsing only ever
+// shrank to this floor and stopped instead of reaching its real target.
+const OVERLAY_MIN_WIDTH = 380;
+const OVERLAY_MIN_HEIGHT = 480;
+
 function createOverlayWindow() {
   const { width, height } = screen.getPrimaryDisplay().workAreaSize;
 
   overlayWindow = new BrowserWindow({
     width: 528, // 480 + ~half inch (48px @ 96dpi)
     height: 640,
-    // Floor below which the welcome screen's cards/rows start clipping or
-    // overlapping instead of just looking cozy — resizable stays true, but
-    // nothing stopped it being dragged smaller than its own content without these.
     minWidth: 380,
     minHeight: 480,
     x: width - 548, // keeps the same 20px right-edge margin as before
@@ -988,6 +995,13 @@ ipcMain.on('quit-app', () => app.quit());
 
 ipcMain.on('resize-overlay', (event, { width, height }) => {
   if (overlayWindow) {
+    // setSize() below is clamped by the window's minimum-size constraint —
+    // see OVERLAY_MIN_WIDTH/HEIGHT's comment. Capping the minimum at
+    // whatever's actually being requested (never raising it above the
+    // normal floor) means collapsing to COLLAPSED_HEIGHT (44px, well under
+    // 480) still reaches its real target, while expanding back to the full
+    // welcome-screen size restores the normal floor exactly as before.
+    overlayWindow.setMinimumSize(Math.min(width, OVERLAY_MIN_WIDTH), Math.min(height, OVERLAY_MIN_HEIGHT));
     overlayWindow.setSize(width, height);
   }
 });

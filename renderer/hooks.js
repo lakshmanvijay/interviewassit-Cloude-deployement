@@ -46,12 +46,14 @@ function useExpiryCountdown(expiresAtRaw) {
     const expiresAt = new Date(expiresAtRaw).getTime();
     let timeoutId;
     // Self-rescheduling instead of a fixed setInterval: 30s ticks are plenty
-    // while there's minutes left to show, but the last 60s switches to a
-    // seconds countdown (see underOneMinute below), which needs a 1s tick to
-    // actually look like it's counting down instead of jumping.
+    // while there's more than a day left (fullLabel below only shows whole
+    // days+hours at that scale anyway), but once under 24h, fullLabel starts
+    // showing live seconds — a 30s tick would make that digit jump instead
+    // of actually counting down, so this switches to 1s ticks for the whole
+    // sub-24h stretch, not just the final minute.
     function schedule() {
       const msLeft = expiresAt - Date.now();
-      const delay = msLeft <= 60000 ? 1000 : 30000;
+      const delay = msLeft <= 86400000 ? 1000 : 30000;
       timeoutId = setTimeout(() => { setNow(Date.now()); schedule(); }, delay);
     }
     // `now` was captured once at mount (useState(Date.now())) and this
@@ -72,8 +74,10 @@ function useExpiryCountdown(expiresAtRaw) {
   if (!expiresAt || expiresAt <= now) return null;
 
   const msLeft = expiresAt - now;
+  const d = Math.floor(msLeft / 86400000);
   const h = Math.floor(msLeft / 3600000);
   const m = Math.floor((msLeft % 3600000) / 60000);
+  const s = Math.floor((msLeft % 60000) / 1000);
   const underOneMinute = msLeft < 60000;
   // totalMinutes rounds up (never shows 0m while time is technically still
   // left) — used by TitleBar's compact minutes-only badge; label keeps the
@@ -82,7 +86,12 @@ function useExpiryCountdown(expiresAtRaw) {
   // totalSeconds only matters once underOneMinute — TitleBar switches its
   // badge to "Ns" instead of "1m" for that last stretch.
   const totalSeconds = Math.max(0, Math.ceil(msLeft / 1000));
-  return { h, m, totalMinutes, totalSeconds, underOneMinute, label: `${h}h ${m}m`, critical: h === 0 && m <= 5 };
+  // fullLabel: days once there's more than 24h left (down to the hour — at
+  // that scale seconds/minutes aren't meaningful to a glance anyway), else
+  // hours/minutes/seconds so the last day counts down live rather than
+  // sitting on a single "Xh Ym" reading for up to 59 more minutes at a time.
+  const fullLabel = d >= 1 ? `${d}d ${h % 24}h` : `${h}h ${m}m ${s}s`;
+  return { d, h, m, s, totalMinutes, totalSeconds, underOneMinute, label: `${h}h ${m}m`, fullLabel, critical: h === 0 && m <= 5 };
 }
 
 // Store-field-backed wrapper around useExpiryCountdown — used for both

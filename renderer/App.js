@@ -525,6 +525,20 @@ function App({ store }) {
         ipcRenderer.invoke('get-active-assist-session')
           .then(expiresAt => { if (expiresAt) store.setState({ assistExpiresAt: expiresAt }); })
           .catch(() => {});
+        // Same pull, same reason, for creditBalance — EmptyState.js's ACTIVE
+        // SESSION card falls back to creditBalance.lots (soonestActiveLot)
+        // whenever no session row is open, so this needs to arrive just as
+        // reliably as assistExpiresAt does, and for the same reason
+        // (renderer-ready's re-send alone wasn't enough — see this handler's
+        // other pull above). Purely a background store update — doesn't
+        // touch startingSession/disabled state on any button, "Start
+        // listening"/"Continue" stay clickable the whole time regardless of
+        // whether this has resolved yet, same as EmptyState.js's
+        // startListening() already does with the server's actual response
+        // being the sole source of truth rather than a client-side gate.
+        ipcRenderer.invoke('get-credit-balance')
+          .then(r => { if (r && r.ok) store.setState({ creditBalance: r.balance }); })
+          .catch(() => {});
       },
       'resume-parsed':          (_, text) => store.setState({ resumeText: text }),
       'interview-settings-received': (_, settings) => store.setState({ interviewSettings: settings }),
