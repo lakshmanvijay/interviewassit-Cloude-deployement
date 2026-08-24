@@ -139,10 +139,9 @@ function disconnect() {
 // before the real question (see App.js's ask() and screenAnalyze.js).
 // `displayQuestion`, if given, is the short human-readable question alone,
 // used by the backend for Interview History persistence instead of the
-// padded `question` blob (see WsInboundMessage/InterviewWebSocketHandler on
-// the backend, which already prefers it when present) — pass it whenever
-// the caller has a clean short version, so what shows up in history/the web
-// app is the real question, not the internal prompt.
+// padded `question` blob — pass it whenever the caller has a clean short
+// version, so what shows up in history is the real question, not the
+// internal prompt.
 async function askBackend(question, onDelta, provider, images, displayQuestion) {
   await connect();
   if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error('Not connected');

@@ -156,12 +156,6 @@ function App({ store }) {
         // (reflow/scroll-anchoring), which would otherwise let the question
         // drift down out of the top spot over the course of a long answer.
         scrollQuestionIntoTop(userId);
-      // `text` (this ask() call's own param, the real short question — NOT
-      // `question` above, which is the padded system-prompt+history+text
-      // blob actually sent to the LLM) is passed as displayQuestion so the
-      // backend persists the real question to Interview History instead of
-      // that whole padded blob. See askBackend's displayQuestion param in
-      // interviewSocket.js.
       }, 'cerebras', undefined, text);
       // Recorded so a later continuation can find this bubble/request again,
       // and so cancelInFlight() can abort this exact request by id.
