@@ -40,7 +40,7 @@ const store = createStore({
   collapsed: false,
   sendDisabled: false,
   capturingScreenshot: false,
-  opacity: 88,
+  opacity: 78,
   opacityOpen: false,  // toggled by the 👁 titlebar button — shows the opacity slider popover instead of it sitting inline all the time
   settingsOpen: false,
   account: null,   // AuthResponse: { id, name, email, plan, credits, creditsExpireAt, resume, avatar, provider, joinedAt } once received from the web app's login, or null
@@ -54,6 +54,7 @@ const store = createStore({
   resumeInfo: null,  // { name, size, contentType, url, uploadedAt } from GET /api/resumes/me — resumeInfo.name is the real uploaded filename (account.resume is just a URL whose last path segment is a random access token, not a filename). null if no resume uploaded. See EmptyState.js.
   shortcutsOpen: false,  // toggled by the ⌨ titlebar button — shows ShortcutsModal
   paymentHistoryOpen: false,  // toggled from EmptyState's "History" link — shows PaymentHistoryModal
+  feedbackOpen: false,  // set true at the end of App.js's quitSession() — shows FeedbackModal (star rating + message, POST /api/feedback)
   // 10-minute free trial (no InterviewSession row, no credit lot spent) — ms
   // timestamp of when the last trial actually FINISHED (set in App.js's
   // quitSession(), not startTrial() — the cooldown counts from completion,

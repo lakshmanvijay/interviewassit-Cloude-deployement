@@ -31,16 +31,14 @@ function useStoreSlice(store, selector, isEqual) {
   return slice;
 }
 
-// Ticks an ISO-timestamp store field down into an "Xh Ym left" label. Used
-// for both store.assistExpiresAt (a paid Live Assist window — set once POST
-// /api/sessions/start succeeds) and store.trialExpiresAt (a free trial —
-// set once POST /api/sessions/trial/start succeeds, see App.js's
-// startTrial()); pass `field` to pick which. null/past means no active
-// window. Shared by EmptyState.js (pre-session countdown card) and
-// TitleBar.js (the in-session timer badge, which turns red in the last 5
-// minutes — see overlay.html's .assist-timer.critical).
-function useAssistCountdown(store, field = 'assistExpiresAt') {
-  const expiresAtRaw = useStoreSlice(store, s => s[field]);
+// Ticks a raw ISO-timestamp value down into an "Xh Ym left" label. null/past
+// means no active window. This is the shared core — most callers go through
+// useAssistCountdown below (which pulls the timestamp out of a store field),
+// but EmptyState.js's ACTIVE SESSION card needs to drive the same countdown
+// off a value computed from creditBalance.lots instead (see its own
+// comment), which isn't a single store field, hence this taking the raw
+// value directly rather than a (store, field) pair.
+function useExpiryCountdown(expiresAtRaw) {
   const [now, setNow] = useState(Date.now());
 
   useEffect(() => {
@@ -48,14 +46,25 @@ function useAssistCountdown(store, field = 'assistExpiresAt') {
     const expiresAt = new Date(expiresAtRaw).getTime();
     let timeoutId;
     // Self-rescheduling instead of a fixed setInterval: 30s ticks are plenty
-    // while there's minutes left to show, but the last 60s switches to a
-    // seconds countdown (see underOneMinute below), which needs a 1s tick to
-    // actually look like it's counting down instead of jumping.
+    // while there's more than a day left (fullLabel below only shows whole
+    // days+hours at that scale anyway), but once under 24h, fullLabel starts
+    // showing live seconds — a 30s tick would make that digit jump instead
+    // of actually counting down, so this switches to 1s ticks for the whole
+    // sub-24h stretch, not just the final minute.
     function schedule() {
       const msLeft = expiresAt - Date.now();
-      const delay = msLeft <= 60000 ? 1000 : 30000;
+      const delay = msLeft <= 86400000 ? 1000 : 30000;
       timeoutId = setTimeout(() => { setNow(Date.now()); schedule(); }, delay);
     }
+    // `now` was captured once at mount (useState(Date.now())) and this
+    // effect only re-runs when expiresAtRaw itself changes — i.e. whenever a
+    // trial/assist window actually starts. Without refreshing `now` here
+    // too, a component that mounted (e.g. TitleBar, present from app
+    // launch) minutes before the window started keeps showing that stale
+    // mount-time `now`, inflating the displayed remaining time by however
+    // long the app had been idle — a 10-minute trial started 2 minutes after
+    // launch would read "12m" until the first scheduled tick corrects it.
+    setNow(Date.now());
     schedule();
     return () => clearTimeout(timeoutId);
   }, [expiresAtRaw]);
@@ -65,8 +74,10 @@ function useAssistCountdown(store, field = 'assistExpiresAt') {
   if (!expiresAt || expiresAt <= now) return null;
 
   const msLeft = expiresAt - now;
+  const d = Math.floor(msLeft / 86400000);
   const h = Math.floor(msLeft / 3600000);
   const m = Math.floor((msLeft % 3600000) / 60000);
+  const s = Math.floor((msLeft % 60000) / 1000);
   const underOneMinute = msLeft < 60000;
   // totalMinutes rounds up (never shows 0m while time is technically still
   // left) — used by TitleBar's compact minutes-only badge; label keeps the
@@ -75,7 +86,24 @@ function useAssistCountdown(store, field = 'assistExpiresAt') {
   // totalSeconds only matters once underOneMinute — TitleBar switches its
   // badge to "Ns" instead of "1m" for that last stretch.
   const totalSeconds = Math.max(0, Math.ceil(msLeft / 1000));
-  return { h, m, totalMinutes, totalSeconds, underOneMinute, label: `${h}h ${m}m`, critical: h === 0 && m <= 5 };
+  // fullLabel: days once there's more than 24h left (down to the hour — at
+  // that scale seconds/minutes aren't meaningful to a glance anyway), else
+  // hours/minutes/seconds so the last day counts down live rather than
+  // sitting on a single "Xh Ym" reading for up to 59 more minutes at a time.
+  const fullLabel = d >= 1 ? `${d}d ${h % 24}h` : `${h}h ${m}m ${s}s`;
+  return { d, h, m, s, totalMinutes, totalSeconds, underOneMinute, label: `${h}h ${m}m`, fullLabel, critical: h === 0 && m <= 5 };
 }
 
-module.exports = { useStoreSlice, useAssistCountdown };
+// Store-field-backed wrapper around useExpiryCountdown — used for both
+// store.assistExpiresAt (a paid Live Assist window — set once POST
+// /api/sessions/start succeeds) and store.trialExpiresAt (a free trial —
+// set once POST /api/sessions/trial/start succeeds, see App.js's
+// startTrial()); pass `field` to pick which. Shared by TitleBar.js (the
+// in-session timer badge, which turns red in the last 5 minutes — see
+// overlay.html's .assist-timer.critical) and, for the trial field, EmptyState.js.
+function useAssistCountdown(store, field = 'assistExpiresAt') {
+  const expiresAtRaw = useStoreSlice(store, s => s[field]);
+  return useExpiryCountdown(expiresAtRaw);
+}
+
+module.exports = { useStoreSlice, useAssistCountdown, useExpiryCountdown };

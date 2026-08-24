@@ -7,6 +7,15 @@ function VoiceBar({ store, voiceController }) {
   const liveTranscript = useStoreSlice(store, s => s.liveTranscript);
   const autoAsk        = useStoreSlice(store, s => s.autoAsk);
   const collapsed      = useStoreSlice(store, s => s.collapsed);
+  // Same gate InputArea.js already uses — this bar was only ever hidden via
+  // `collapsed`, so it stayed fully visible (showing whatever voiceStatus
+  // was last set to, e.g. a stale "capturing internal audio") on the welcome
+  // screen after quitting a session, since quitting drops sessionStarted
+  // back to false but leaves conversation empty, which is exactly when
+  // Conversation.js renders EmptyState instead of messages — this bar isn't
+  // part of that screen at all conceptually, mic status only matters once a
+  // session is actually running.
+  const sessionStarted = useStoreSlice(store, s => s.sessionStarted);
   const meterRef = useRef(null);
 
   // VAD energy is written straight to this node's style by the voice
@@ -15,6 +24,8 @@ function VoiceBar({ store, voiceController }) {
   useEffect(() => {
     voiceController.attachMeterEl(meterRef.current);
   }, [voiceController]);
+
+  if (!sessionStarted) return null;
 
   return html`
     <div id="voice-bar" style=${collapsed ? 'display:none' : ''}>

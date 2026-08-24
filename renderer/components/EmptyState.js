@@ -1,9 +1,9 @@
 const { ipcRenderer, shell } = require('electron');
 const { html } = require('../html');
 const { useState, useEffect } = require('preact/hooks');
-const { useStoreSlice, useAssistCountdown } = require('../hooks');
+const { useStoreSlice, useAssistCountdown, useExpiryCountdown } = require('../hooks');
 
-const TRIAL_COOLDOWN_MS = 1 * 60 * 1000; // 1 minute — must match backend's TRIAL_COOLDOWN (InterviewSessionService), this is only the local display estimate
+const TRIAL_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes — must match backend's TRIAL_COOLDOWN (InterviewSessionService), this is only the local display estimate
 
 // Ticks store.trialUsedAt down into cooldown eligibility — this IS the
 // "when do I get another free trial" timer, rendered live on the trial
@@ -57,20 +57,17 @@ function hasNoCredits(creditBalance) {
   return !creditBalance || !(creditBalance.totalMinutesAvailable > 0);
 }
 
-function daysUntil(iso) {
-  if (!iso) return null;
-  const ms = new Date(iso).getTime() - Date.now();
-  return ms > 0 ? Math.ceil(ms / 86400000) : 0;
-}
-
 // A balance can span several lots, each with its own expiry — the single
 // most relevant date to show is whichever still-usable lot runs out first.
-function soonestExpiryDays(creditBalance) {
+function soonestActiveLot(creditBalance) {
   if (!creditBalance || !Array.isArray(creditBalance.lots)) return null;
-  const active = creditBalance.lots.filter(l => l.minutesRemaining > 0 && l.expiresAt);
+  // activatedAt gates this to a lot whose window clock has actually started
+  // (see CreditLot/CreditLotService) — a still-dormant lot (bought but never
+  // used) has minutesRemaining > 0 too but no window running yet, so it
+  // isn't an "active window" to show a countdown for.
+  const active = creditBalance.lots.filter(l => l.minutesRemaining > 0 && l.expiresAt && l.activatedAt);
   if (!active.length) return null;
-  const soonest = active.reduce((a, b) => (new Date(a.expiresAt) < new Date(b.expiresAt) ? a : b));
-  return daysUntil(soonest.expiresAt);
+  return active.reduce((a, b) => (new Date(a.expiresAt) < new Date(b.expiresAt) ? a : b));
 }
 
 function formatMinutes(mins) {
@@ -84,6 +81,16 @@ function capitalize(s) {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : '—';
 }
 
+// "8/22/2026, 11:30:20 PM" — matches the web app's absolute-time display for
+// the same field, shown alongside the "Xh Ym left" countdown so a user who
+// glances at this later (or across a time-zone gap) sees exactly when it
+// ends, not just how long was left at some earlier render.
+function formatExpiry(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? null : d.toLocaleString('en-US');
+}
+
 function EmptyState({ store, onToggleListen, onStartTrial }) {
   const account           = useStoreSlice(store, s => s.account);
   const sessionStarted    = useStoreSlice(store, s => s.sessionStarted);
@@ -93,10 +100,35 @@ function EmptyState({ store, onToggleListen, onStartTrial }) {
   const proficiencyLevel  = useStoreSlice(store, s => s.proficiencyLevel);
   const creditBalance     = useStoreSlice(store, s => s.creditBalance);
   const resumeInfo        = useStoreSlice(store, s => s.resumeInfo);
+  // Raw ISO value alongside the derived countdown (assist) below — needed to
+  // render the absolute "Expires 8/22/2026, 11:30:20 PM" line, which the
+  // countdown hook's {h, m, label, ...} shape doesn't carry.
+  const assistExpiresAt   = useStoreSlice(store, s => s.assistExpiresAt);
   const assist = useAssistCountdown(store);
+  // assist (above) only reflects a currently *open* Live Assist session row
+  // (store.assistExpiresAt, restored via 'active-assist-session' / the
+  // get-active-assist-session pull — see App.js). But a credit lot stays
+  // activated and within its window even after that session row closes
+  // (pause/quit, or an app restart that never reopened one) — e.g. someone
+  // who paused with 52 of their 60 minutes still unused, window still open
+  // for another day. Continuing in that state reuses the same lot for free
+  // (see backend's activateLiveAssist/pickLotForNewSession), so the ACTIVE
+  // SESSION card below should still show — this used to depend solely on
+  // `assist`, so it silently disappeared the moment the session row closed
+  // even though the lot itself was still very much active, which is exactly
+  // what creditBalance.lots (already reliably populated — see the
+  // credits-row's own "expires in Xd" a few lines down) can tell us
+  // independent of any session row.
+  const activeLot = soonestActiveLot(creditBalance);
+  const lotWindow = useExpiryCountdown(activeLot ? activeLot.expiresAt : null);
+  // Prefer the session-based countdown when a session actually is open
+  // (assist), since that one is capped at the real remaining credit budget
+  // (see backend's openLiveAssistWindow); fall back to the lot's own window
+  // deadline otherwise.
+  const windowTimer = assist || lotWindow;
+  const windowExpiresAt = assist ? assistExpiresAt : (activeLot ? activeLot.expiresAt : null);
   const trial = useTrialCooldown(store);
   const noCredits = hasNoCredits(creditBalance);
-  const expiresInDays = soonestExpiryDays(creditBalance);
   const minutesAvailable = creditBalance ? creditBalance.totalMinutesAvailable : 0;
 
   // Transient UI navigation, not app state — doesn't need to survive a
@@ -203,7 +235,7 @@ function EmptyState({ store, onToggleListen, onStartTrial }) {
 
         <div class="setup-section-label">YOUR SESSION</div>
 
-        ${sessionStartError === 'no-credits' || (noCredits && !assist) ? html`
+        ${sessionStartError === 'no-credits' || (noCredits && !windowTimer) ? html`
           <div class="session-error no-credits">
             You're out of credits. Buy more to start a Live Assist session.
             <a onClick=${() => shell.openExternal('https://vijayamai.com/credits')}>Buy credits ↗</a>
@@ -211,68 +243,94 @@ function EmptyState({ store, onToggleListen, onStartTrial }) {
         ` : sessionStartError ? html`
           <div class="session-error">${sessionStartError}</div>
         ` : html`
+          <!-- windowTimer, not assist — assist only reflects a currently
+               *open* session row (store.assistExpiresAt), so right after
+               buying/activating credit but before any session row happens
+               to be open again, this kept showing "Starts a new 1-hour
+               session" / "Uses 1 credit" even though continuing would
+               actually reuse the still-active lot for free. windowTimer
+               falls back to that lot (creditBalance.lots via
+               soonestActiveLot) whenever no session row is open — same
+               value the welcome screen's ACTIVE SESSION card already uses. -->
           <button class="session-card" disabled=${startingSession} onClick=${startListening}>
             <div class="session-card-main">
               <span class="session-card-title">${startingSession ? 'Starting…' : 'Continue'}</span>
-              ${assist && html`<span class="session-card-badge">ACTIVE</span>`}
+              ${windowTimer && html`<span class="session-card-badge">ACTIVE</span>`}
             </div>
             <div class="session-card-sub">
-              ${assist ? `Your session is live — ${assist.label} left.` : 'Starts a new 1-hour session.'}
+              ${windowTimer ? `Continuing reuses your active window — ${windowTimer.fullLabel} left.` : 'Starts a new 1-hour session.'}
             </div>
-            <span class="session-card-credit">✓ ${assist ? 'No credit used' : 'Uses 1 credit'}</span>
+            <span class="session-card-credit">✓ ${windowTimer ? 'No credit used' : 'Uses 1 credit'}</span>
           </button>
         `}
 
-        ${!assist && html`
+        <!-- Free trial is only for someone with nothing else to fall back on: hidden the moment
+             they have an active paid window (windowTimer — an open session row OR an already-
+             activated credit lot with time left, see its own comment above) OR any usable credit
+             lot at all (noCredits is false — see hasNoCredits(), which counts dormant/unactivated
+             lots too, not just an already-active one), even if that lot hasn't been activated yet.
+             The trial is meant strictly for users with zero credits and no active window, not a
+             bonus on top of paid credits. -->
+        ${!windowTimer && noCredits && html`
           <button class="trial-btn" disabled=${!trial.eligible} onClick=${onStartTrial}>
             <span>🎁</span> ${trial.eligible ? '10-minute free trial' : `Free trial available in ${trial.remainingLabel}`}
           </button>
         `}
 
-        <a class="setup-back" onClick=${() => setShowSetup(false)}>‹ Back</a>
+        <button class="back-btn" onClick=${() => setShowSetup(false)}>
+          <svg class="back-btn-icon" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="15 18 9 12 15 6"></polyline>
+          </svg>
+          Back
+        </button>
       ` : !sessionStarted ? html`
         <!-- ── LOGGED IN, PRE-SESSION ── -->
         <div class="welcome-title">Welcome back, ${account.name}</div>
         <div class="welcome-sub">
-          ${assist ? 'Your session is live. Jump back in whenever you like.' : 'Ready when you are.'}
+          ${windowTimer ? 'Your session is live. Jump back in whenever you like.' : 'Ready when you are.'}
         </div>
 
-        ${assist && html`
+        ${windowTimer && html`
           <div class="pass-card">
             <div class="pass-card-row">
               <span class="pass-dot"></span> ACTIVE SESSION
             </div>
-            <div class="pass-timer ${assist.critical ? 'critical' : ''}">${assist.label} <span>left</span></div>
+            <!-- fullLabel switches format at the 24h mark: "Xd Yh" once
+                 there's more than a day left, "Xh Ym Zs" (live seconds)
+                 once under 24h — see hooks.js's useExpiryCountdown. -->
+            <div class="pass-timer ${windowTimer.critical ? 'critical' : ''}">${windowTimer.fullLabel} <span>left</span></div>
+            ${formatExpiry(windowExpiresAt) && html`<div class="pass-expiry">Expires ${formatExpiry(windowExpiresAt)}</div>`}
+            <!-- Same big lettering as the window countdown above (.pass-timer)
+                 rather than the small credits-row text — the window
+                 countdown alone doesn't tell you how much of your credit is
+                 actually left to spend within it, and that's the number a
+                 user glancing at this card actually wants to know at a glance. -->
+            <div class="pass-timer">${formatMinutes(minutesAvailable)} <span>available</span></div>
             <div class="pass-note">✓ No extra credit needed until this window ends.</div>
           </div>
         `}
 
+        <!-- Balance text removed from here entirely — the pass-card above
+             already shows "{minutes} available" in big lettering whenever
+             there's anything active to show (windowTimer), so this small-text
+             repeat was pure duplication. "expires in Xd" was dropped from
+             this row for the same reason a while back (see pass-card's
+             formatExpiry). -->
         <div class="credits-row">
-          <span>
-            ◈ ${formatMinutes(minutesAvailable)} available
-            ${!noCredits && expiresInDays != null ? html` · expires in ${expiresInDays}d` : ''}
-          </span>
           <a onClick=${() => shell.openExternal('https://vijayamai.com/credits')}>Get credits ↗</a>
-        </div>
-        <div class="credits-row">
-          <a onClick=${() => store.setState({ paymentHistoryOpen: true })}>◈ Purchase history</a>
         </div>
 
         <button class="cta-btn" onClick=${() => { store.setState({ sessionStartError: null }); setShowSetup(true); }}>
           <span>🎤</span> Start listening
         </button>
         <div class="welcome-caption">
-          ${assist ? 'Continue your active session.' : noCredits ? 'No credits available — get more to continue.' : 'Spends 1 credit — buys a 1-hour window.'}
+          ${windowTimer ? 'Continue your active session.' : noCredits ? 'No credits available — get more to continue.' : 'Spends 1 credit — buys a 1-hour window.'}
         </div>
       ` : html`
         <!-- ── SESSION ACTIVE — capture already starts automatically
              (startListening()/startTrial() both call onToggleListen()), so
              there's no "hit the mic" instruction needed here anymore. ── -->
         <div class="empty-text">Ready.</div>
-      `}
-
-      ${account && html`
-        <button class="login-btn logout-btn" onClick=${() => ipcRenderer.send('logout')}>Logout</button>
       `}
     </div>
   `;

@@ -15,6 +15,7 @@ const { TitleBar } = require('./components/TitleBar');
 const { SettingsPanel } = require('./components/SettingsPanel');
 const { ShortcutsModal } = require('./components/ShortcutsModal');
 const { PaymentHistoryModal } = require('./components/PaymentHistoryModal');
+const { FeedbackModal } = require('./components/FeedbackModal');
 const { StatusWarning } = require('./components/StatusWarning');
 const { UpdateBanner } = require('./components/UpdateBanner');
 const { VoiceBar } = require('./components/VoiceBar');
@@ -93,8 +94,21 @@ function App({ store }) {
 
     const { mode, resumeText, proficiencyLevel, interviewSettings } = store.getState();
     const systemPrompt = getSystemPrompt(mode, resumeText, proficiencyLevel, interviewSettings);
+    // Capped per turn — priorHistory was folded in at full length, so one
+    // long previous answer (multi-paragraph, with a code block) could add
+    // several hundred extra tokens to EVERY question's prompt from then on,
+    // for context that's rarely needed in full — the LLM only needs enough
+    // of the prior turn to keep continuity, not a verbatim replay. Bigger
+    // prompt = more for the provider to prefill before it can start
+    // generating, which shows up directly as slower time-to-first-token.
+    const HISTORY_TURN_MAX_CHARS = 400;
     const historyText = priorHistory.length
-      ? '\n\nRECENT CONVERSATION:\n' + priorHistory.map(m => `${m.role === 'user' ? 'Q' : 'A'}: ${m.content}`).join('\n')
+      ? '\n\nRECENT CONVERSATION:\n' + priorHistory.map(m => {
+          const content = m.content.length > HISTORY_TURN_MAX_CHARS
+            ? m.content.slice(0, HISTORY_TURN_MAX_CHARS) + '…'
+            : m.content;
+          return `${m.role === 'user' ? 'Q' : 'A'}: ${content}`;
+        }).join('\n')
       : '';
     const question = `${systemPrompt}${historyText}\n\nNEW QUESTION:\n${text}`;
 
@@ -112,6 +126,14 @@ function App({ store }) {
     }
 
     let lastRenderAt = 0;
+    // Latency instrumentation — brackets the leg voice.js's own STT-finalize
+    // timing log can't see: from the moment we actually send the question
+    // over the wire to the first answer token rendered. Combined with the
+    // backend's own "First token in Xms" log (server-side, LLM+access-check
+    // only), this pins down whether a slow-feeling answer is network time,
+    // backend queueing, or the LLM itself.
+    const askSentAt = performance.now();
+    let firstTokenLogged = false;
     try {
       // Explicitly pinned to cerebras — it's the fast provider (500-2000+
       // tok/s on dedicated hardware vs ~20-80 tok/s for OpenAI/Anthropic).
@@ -120,6 +142,10 @@ function App({ store }) {
       // provider configured" incident). Remove this pin once the backend
       // default is confirmed fixed, if you'd rather not hardcode it here.
       const { id: askId, promise } = await askBackend(question, partial => {
+        if (!firstTokenLogged) {
+          firstTokenLogged = true;
+          console.log(`[ask] first token in ${Math.round(performance.now() - askSentAt)}ms`);
+        }
         const now = performance.now();
         if (now - lastRenderAt < 30) return;
         lastRenderAt = now;
@@ -283,7 +309,10 @@ function App({ store }) {
     // the only way to tell, at this point, whether what's ending was a free
     // trial (as opposed to a paid session, or nothing at all).
     const wasTrialActive = !!store.getState().trialExpiresAt;
-    store.setState({ sessionStarted: false, sessionStartError: null, assistExpiresAt: null, trialExpiresAt: null });
+    // feedbackOpen: true — prompts for a star rating right as the session
+    // ends (see FeedbackModal.js), while the interview is still fresh in
+    // mind, rather than leaving it to be volunteered unprompted.
+    store.setState({ sessionStarted: false, sessionStartError: null, assistExpiresAt: null, trialExpiresAt: null, feedbackOpen: true });
 
     if (wasTrialActive) {
       // The post-trial cooldown counts from completion, not from when the
@@ -423,6 +452,10 @@ function App({ store }) {
     store.setState({ paymentHistoryOpen: false });
   }
 
+  function closeFeedback() {
+    store.setState({ feedbackOpen: false });
+  }
+
   function toggleOpacity() {
     store.setState(s => ({ opacityOpen: !s.opacityOpen }));
   }
@@ -476,6 +509,30 @@ function App({ store }) {
         if (key) { try { trialUsedAt = Number(localStorage.getItem(key)) || 0; } catch (e) {} }
         store.setState({ account, trialUsedAt });
         connectInterviewSocket().catch(() => {});
+        // Pull-based fallback for the ACTIVE SESSION restore, on top of the
+        // 'active-assist-session' push below — see main.js's
+        // get-active-assist-session for why the push alone wasn't fully
+        // reliable. Safe to fire every time 'account-received' does (not
+        // just once at cold start): a plain re-fetch, idempotent, and by
+        // definition sessionToken is already set on the main-process side
+        // once this event exists at all.
+        ipcRenderer.invoke('get-active-assist-session')
+          .then(expiresAt => { if (expiresAt) store.setState({ assistExpiresAt: expiresAt }); })
+          .catch(() => {});
+        // Same pull, same reason, for creditBalance — EmptyState.js's ACTIVE
+        // SESSION card falls back to creditBalance.lots (soonestActiveLot)
+        // whenever no session row is open, so this needs to arrive just as
+        // reliably as assistExpiresAt does, and for the same reason
+        // (renderer-ready's re-send alone wasn't enough — see this handler's
+        // other pull above). Purely a background store update — doesn't
+        // touch startingSession/disabled state on any button, "Start
+        // listening"/"Continue" stay clickable the whole time regardless of
+        // whether this has resolved yet, same as EmptyState.js's
+        // startListening() already does with the server's actual response
+        // being the sole source of truth rather than a client-side gate.
+        ipcRenderer.invoke('get-credit-balance')
+          .then(r => { if (r && r.ok) store.setState({ creditBalance: r.balance }); })
+          .catch(() => {});
       },
       'resume-parsed':          (_, text) => store.setState({ resumeText: text }),
       'interview-settings-received': (_, settings) => store.setState({ interviewSettings: settings }),
@@ -497,7 +554,7 @@ function App({ store }) {
       // account on the next 'account-received') so the brief logged-out
       // window in between never shows a stale cooldown left over from
       // whichever account was just signed out.
-      'logged-out':             () => { clearTimeout(trialTimerRef.current); store.setState({ account: null, resumeText: '', interviewSettings: null, sessionStarted: false, assistExpiresAt: null, trialExpiresAt: null, trialUsedAt: 0, sessionStartError: null, paymentHistoryOpen: false, creditBalance: null, resumeInfo: null }); disconnectInterviewSocket(); },
+      'logged-out':             () => { clearTimeout(trialTimerRef.current); store.setState({ account: null, resumeText: '', interviewSettings: null, sessionStarted: false, assistExpiresAt: null, trialExpiresAt: null, trialUsedAt: 0, sessionStartError: null, paymentHistoryOpen: false, feedbackOpen: false, creditBalance: null, resumeInfo: null }); disconnectInterviewSocket(); },
       'update-ready':           (_, { version }) => store.setState({ updateReady: true, updateVersion: version }),
     };
     Object.entries(listeners).forEach(([ch, fn]) => ipcRenderer.on(ch, fn));
@@ -507,6 +564,13 @@ function App({ store }) {
       setOpacity(next);
     };
     ipcRenderer.on('opacity-step', onOpacityStep);
+
+    // Tells main.js it's now safe to push account/session-restore state —
+    // see main.js's 'renderer-ready' handler for why this can't just rely on
+    // 'did-finish-load' alone (that can fire before the listeners just above
+    // are actually registered, silently dropping e.g. active-assist-session
+    // on some runs).
+    ipcRenderer.send('renderer-ready');
 
     return () => {
       cleanupScroll();
@@ -535,6 +599,7 @@ function App({ store }) {
       <${SettingsPanel} store=${store} onClose=${closeSettings} />
       <${ShortcutsModal} store=${store} onClose=${closeShortcuts} />
       <${PaymentHistoryModal} store=${store} onClose=${closePaymentHistory} />
+      <${FeedbackModal} store=${store} onClose=${closeFeedback} />
       <${StatusWarning} store=${store} />
       <${UpdateBanner} store=${store} onRestart=${() => ipcRenderer.send('restart-and-install')} />
       <${VoiceBar} store=${store} voiceController=${voiceControllerRef.current} />

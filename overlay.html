@@ -336,12 +336,18 @@
   .pass-timer { font-size: 18px; font-weight: 800; color: var(--text); }
   .pass-timer span { font-size: 10px; font-weight: 500; color: var(--text-dim); }
   .pass-timer.critical { color: var(--danger); }
+  .pass-expiry { font-size: 9px; color: var(--text-dim); }
   .pass-note { font-size: 9px; color: var(--text-dim); }
   .credits-row {
     width: 100%; display: flex; align-items: center; justify-content: space-between;
     font-size: 9px; color: var(--text-dim);
   }
-  .credits-row a { color: var(--accent2); cursor: pointer; flex-shrink: 0; margin-left: 6px; }
+  /* margin-left: auto, not just justify-content: space-between on the row —
+     space-between only pushes this to the right edge when there's a sibling
+     to distribute space against. EmptyState.js now omits the balance <span>
+     entirely when the pass-card above already shows it, so this needs to
+     pin itself right on its own in that single-child case. */
+  .credits-row a { color: var(--accent2); cursor: pointer; flex-shrink: 0; margin-left: auto; }
   .credits-row a:hover { text-decoration: underline; }
   .session-error {
     width: 100%; font-size: 10px; line-height: 1.5; color: var(--danger);
@@ -371,6 +377,40 @@
   .payment-status.paid { color: var(--accent); background: rgba(99,255,180,0.12); }
   .payment-status.failed { color: var(--danger); background: rgba(255,95,114,0.12); }
   .payment-status.created { color: var(--text-dim); background: rgba(255,255,255,0.06); }
+
+  /* ── POST-SESSION FEEDBACK (inside #shortcuts-modal, reused) ── */
+  .feedback-body { display: flex; flex-direction: column; gap: 12px; }
+  .feedback-stars { display: flex; gap: 4px; justify-content: center; }
+  .feedback-star {
+    background: none; border: none; cursor: pointer; padding: 2px;
+    font-size: 26px; line-height: 1; color: rgba(255,255,255,0.15);
+    transition: color .1s, transform .1s;
+  }
+  .feedback-star:hover { transform: scale(1.08); }
+  .feedback-star.filled { color: #ffcb6b; }
+  .feedback-textarea {
+    width: 100%; min-height: 64px; resize: vertical;
+    background: rgba(255,255,255,0.05); border: 1px solid var(--border);
+    border-radius: 8px; color: var(--text); font-family: var(--sans);
+    font-size: 11px; line-height: 1.5; padding: 8px 10px; outline: none;
+  }
+  .feedback-textarea::placeholder { color: var(--text-dimmer); }
+  .feedback-textarea:focus { border-color: rgba(99,255,180,0.3); }
+  /* Was .feedback-ons — a typo that never matched FeedbackModal.js's actual
+     class="feedback-actions", so this row (the "Maybe later" link +
+     "Submit feedback" button) never got flex layout at all: it fell back to
+     default block flow, an inline <a> stacked oddly against a block
+     <button> with no spacing/alignment, which is what read as
+     "not responsive". */
+  .feedback-actions {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    flex-wrap: wrap;
+  }
+  .feedback-submit-btn { width: auto; margin-top: 0; padding: 8px 18px; font-size: 11px; }
+  .feedback-thanks {
+    text-align: center; font-size: 12px; color: var(--accent);
+    font-weight: 600; padding: 10px 0;
+  }
 
   /* ── SETUP / CONFIRM SCREEN (opened from "Start listening") ── */
   .setup-tagline { margin-top: -4px; }
@@ -422,6 +462,24 @@
   .setup-back { font-size: 9.5px; color: var(--text-dim); cursor: pointer; margin-top: -2px; }
   .setup-back:hover { color: var(--text); }
 
+  /* Setup screen's "‹ Back" — was a bare text link using the "‹" glyph,
+     which renders thin/misaligned across platforms. A small pill button
+     with an actual stroked chevron icon reads as a real, clickable control
+     instead. */
+  .back-btn {
+    align-self: flex-start; margin-top: -2px;
+    display: inline-flex; align-items: center; gap: 5px;
+    font-family: var(--sans); font-size: 10.5px; font-weight: 600;
+    color: var(--text-dim); background: rgba(255,255,255,0.03);
+    border: 1px solid var(--border); border-radius: 20px;
+    padding: 5px 12px 5px 9px; cursor: pointer; transition: all .15s;
+  }
+  .back-btn-icon { flex-shrink: 0; transition: transform .15s; }
+  .back-btn:hover {
+    background: rgba(99,255,180,0.08); border-color: rgba(99,255,180,0.3); color: var(--accent);
+  }
+  .back-btn:hover .back-btn-icon { transform: translateX(-2px); }
+
   .trial-btn {
     width: 100%; text-align: center; cursor: pointer;
     padding: 8px 12px; border-radius: 10px; border: 1px dashed rgba(79,140,255,0.35);
@@ -451,6 +509,12 @@
     flex: 1; display: flex; flex-direction: column;
     align-items: center; justify-content: center;
     gap: 12px; padding: 20px;
+    /* min-height: 0 lets this flex child actually shrink below its content's
+       natural height (flex items default to min-height: auto, ignoring the
+       parent's fixed height) so overflow-y below can actually kick in —
+       without it, content taller than the window just got clipped by #app's
+       overflow: hidden at shorter window heights instead of scrolling. */
+    min-height: 0; overflow-y: auto;
   }
   .empty-icon { font-size: 32px; filter: grayscale(1); opacity: .5; }
   .empty-text { font-size: 11px; color: var(--text-dim); text-align: center; line-height: 1.6; }

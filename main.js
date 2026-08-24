@@ -1,4 +1,4 @@
-const { app, BrowserWindow, globalShortcut, ipcMain, screen, Tray, Menu, nativeImage, session, desktopCapturer, shell, safeStorage, powerMonitor } = require('electron');
+const { app, BrowserWindow, globalShortcut, ipcMain, screen, Menu, session, desktopCapturer, shell, safeStorage, powerMonitor } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const log = require('electron-log');
 const path = require('path');
@@ -10,8 +10,8 @@ const https = require('https');
 // There's exactly one main process for the whole app — an uncaught
 // exception ANYWHERE in it (a stray IPC send to a disposed frame, a bad
 // network callback, anything) otherwise takes the entire app down
-// silently, including the tray icon. For a background/tray app that's
-// supposed to keep running, logging and continuing is the right default —
+// silently. For a background app that's supposed to keep running, logging
+// and continuing is the right default —
 // the alternative (crashing) is strictly worse for every error class this
 // app actually throws today. electron-log's file transport still hasn't
 // been configured yet at this point (that happens in setupAutoUpdater()),
@@ -122,7 +122,6 @@ app.on('open-url', (event, url) => {
 // its own server-side provider keys.
 
 let overlayWindow = null;
-let tray = null;
 let isOverlayVisible = true;
 // Set true only once a real quit is actually underway (see 'before-quit'
 // below) — lets the window's own 'close' handler tell an OS-level close
@@ -329,7 +328,7 @@ function fetchPaymentHistory(token) {
 // already-active Live Assist session (assistExpiresAt still in the future)
 // so its countdown survives an app restart instead of only being known
 // right after clicking "Start listening" this same run.
-function fetchActiveSessions(token) {
+function fetchveSessions(token) {
   const api = new URL(LOGIN_API_URL);
   return fetchJsonAuth(`${api.protocol}//${api.host}/api/sessions/me`, token, 8000, 'Sessions fetch');
 }
@@ -419,6 +418,16 @@ function endTrialSession(token) {
   return postJsonAuth(`${api.protocol}//${api.host}/api/sessions/trial/end`, token, {}, 10000);
 }
 
+// Posts a post-session star rating (1-5) + optional freeform message — see
+// the renderer's FeedbackModal, shown from App.js's quitSession(). Same
+// host as LOGIN_API_URL. Resolves { ok, status, body } same shape as the
+// session endpoints above; a 400 means the rating was out of range (see
+// FeedbackService on the backend).
+function submitFeedback(token, payload) {
+  const api = new URL(LOGIN_API_URL);
+  return postJsonAuth(`${api.protocol}//${api.host}/api/feedback`, token, payload, 10000);
+}
+
 // CreditBalanceResponse: { totalMinutesAvailable, lots: [{ id, item,
 // minutesGranted, minutesRemaining, purchasedAt, activatedAt, expiresAt }] }
 // — the source of truth for "how much time is left" display, refreshed
@@ -477,18 +486,35 @@ async function parseResume(url) {
 // This window is visible on YOUR screen but
 // EXCLUDED from any screen capture / share.
 // ─────────────────────────────────────────────
+// Floor below which the welcome screen's cards/rows start clipping or
+// overlapping instead of just looking cozy. Applied as the BrowserWindow's
+// own minWidth/minHeight below AND re-applied (capped) on every
+// 'resize-overlay' call — see that handler for why: setting it once at
+// construction also silently clamped the minimize/collapse button's resize
+// down to COLLAPSED_HEIGHT (44px), since 44 < 480, so collapsing only ever
+// shrank to this floor and stopped instead of reaching its real target.
+const OVERLAY_MIN_WIDTH = 380;
+const OVERLAY_MIN_HEIGHT = 480;
+
 function createOverlayWindow() {
   const { width, height } = screen.getPrimaryDisplay().workAreaSize;
 
   overlayWindow = new BrowserWindow({
     width: 528, // 480 + ~half inch (48px @ 96dpi)
     height: 640,
+    minWidth: 380,
+    minHeight: 480,
     x: width - 548, // keeps the same 20px right-edge margin as before
     y: 40,
     frame: false,
     transparent: true,
     alwaysOnTop: true,
     skipTaskbar: true,
+    // Same file electron-builder embeds into the packaged .exe (see
+    // package.json's build.win.icon) — set here too so an unpackaged dev
+    // run (`npm start` / `electron .`) shows real branding instead of the
+    // generic Electron icon in Task Manager/Alt-Tab.
+    icon: path.join(__dirname, 'assets', 'icon.ico'),
     resizable: true,
     movable: true,
     // Reverted back to focusable — a non-focusable window (the earlier
@@ -547,10 +573,10 @@ function createOverlayWindow() {
   // Alt+F4 (or any other OS-level close signal) sends a 'close' event
   // straight to this window, bypassing app.quit() entirely — previously
   // that fell through to 'window-all-closed' and silently killed the
-  // whole app, including the tray icon. Intercept it and just hide instead,
-  // same as the taskbar/tray "Toggle Overlay" behavior — unless a real
-  // quit is already underway (tray Quit, the titlebar's Close button,
-  // auto-update's quitAndInstall), in which case let it actually close.
+  // whole app. Intercept it and just hide instead, same as the
+  // Ctrl+Shift+H "Toggle Overlay" behavior — unless a real quit is already
+  // underway (the titlebar's Close button, auto-update's quitAndInstall),
+  // in which case let it actually close.
   overlayWindow.on('close', event => {
     if (!isQuitting) {
       event.preventDefault();
@@ -561,6 +587,18 @@ function createOverlayWindow() {
 
   overlayWindow.on('closed', () => {
     overlayWindow = null;
+  });
+
+  // Safety net for a renderer crash (e.g. the GPU-pipeline crash a
+  // degenerate desktop-capture frame or the old ScriptProcessorNode could
+  // trigger — see voice.js/pcm-worklet-processor.js) instead of silently
+  // leaving a dead/blank window: reload it in place so the app recovers
+  // rather than looking like it just vanished.
+  overlayWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error('[fatal] renderer process gone:', details.reason);
+    if (details.reason !== 'clean-exit' && overlayWindow && !overlayWindow.isDestroyed()) {
+      overlayWindow.webContents.reload();
+    }
   });
 
   // Block native minimize — with skipTaskbar:true the window would disappear
@@ -738,29 +776,6 @@ function fetchAccountFromApi(token) {
 
 
 // ─────────────────────────────────────────────
-// SYSTEM TRAY
-// ─────────────────────────────────────────────
-function createTray() {
-  const icon = nativeImage.createEmpty();
-  tray = new Tray(icon);
-
-  const contextMenu = Menu.buildFromTemplate([
-    {
-      label: 'Toggle Overlay (Ctrl+Shift+H)',
-      click: () => toggleOverlay()
-    },
-    { type: 'separator' },
-    {
-      label: 'Quit',
-      click: () => app.quit()
-    }
-  ]);
-
-  tray.setToolTip('VijayamAI — Hidden from screen share');
-  tray.setContextMenu(contextMenu);
-}
-
-// ─────────────────────────────────────────────
 // TOGGLE OVERLAY VISIBILITY
 // ─────────────────────────────────────────────
 function toggleOverlay() {
@@ -777,7 +792,7 @@ function toggleOverlay() {
 // ─────────────────────────────────────────────
 app.whenReady().then(() => {
   // No native menu bar is used anywhere in this app (frame: false, custom
-  // tray context menu instead) — removing Electron's default application
+  // in-window titlebar instead) — removing Electron's default application
   // menu entirely also removes its built-in "Toggle Developer Tools" role,
   // which otherwise keeps its Ctrl+Shift+I/F12 accelerators live even with
   // no menu bar visible. Harmless in dev too, so this isn't gated on
@@ -792,7 +807,6 @@ app.whenReady().then(() => {
   });
 
   createOverlayWindow();
-  createTray();
   if (app.isPackaged) setupAutoUpdater();
 
   // Restore a previous session instead of forcing the user through the
@@ -913,7 +927,7 @@ app.whenReady().then(() => {
   });
 });
 
-// Fires for every real quit path (tray Quit, the titlebar Close button,
+// Fires for every real quit path (the titlebar Close button,
 // quitAndInstall during auto-update) before any window actually closes —
 // this is what lets overlayWindow's own 'close' handler above tell an
 // intentional quit apart from an OS-level close signal (Alt+F4) that
@@ -945,12 +959,41 @@ app.on('window-all-closed', () => {
 // ─────────────────────────────────────────────
 // IPC HANDLERS
 // ─────────────────────────────────────────────
+// Fired by the renderer (App.js) right after it finishes registering its
+// ipcRenderer.on(...) listeners, not on a fixed delay — closes a real race
+// with the 'did-finish-load' pushes below. did-finish-load fires as soon as
+// the page's synchronous script + resources are done loading, but React's
+// useEffect (where those listeners get registered) is scheduled to run
+// after paint, asynchronously — so did-finish-load can and sometimes does
+// win the race, meaning notifyRenderer()/notifyAccountRenderer() fire while
+// nothing is listening yet. Electron's webContents.send has no queuing: a
+// message sent before any listener exists for that channel is just dropped,
+// not buffered. There's no separate re-fetch path for this data (unlike,
+// say, credit balance, which gets refreshed after every Activate/Pause), so
+// a dropped 'active-assist-session' push in particular silently stayed
+// missing all the way until the next full app restart — intermittently, only
+// on whichever runs lost the race. Re-sending here once listeners are
+// confirmed live is safe even on the runs that DID win the race, since both
+// functions only re-push whatever's already cached (idempotent no-ops if
+// nothing changed).
+ipcMain.on('renderer-ready', () => {
+  notifyRenderer();
+  notifyAccountRenderer();
+});
+
 ipcMain.on('toggle-overlay', () => toggleOverlay());
 
 ipcMain.on('quit-app', () => app.quit());
 
 ipcMain.on('resize-overlay', (event, { width, height }) => {
   if (overlayWindow) {
+    // setSize() below is clamped by the window's minimum-size constraint —
+    // see OVERLAY_MIN_WIDTH/HEIGHT's comment. Capping the minimum at
+    // whatever's actually being requested (never raising it above the
+    // normal floor) means collapsing to COLLAPSED_HEIGHT (44px, well under
+    // 480) still reaches its real target, while expanding back to the full
+    // welcome-screen size restores the normal floor exactly as before.
+    overlayWindow.setMinimumSize(Math.min(width, OVERLAY_MIN_WIDTH), Math.min(height, OVERLAY_MIN_HEIGHT));
     overlayWindow.setSize(width, height);
   }
 });
@@ -1011,6 +1054,31 @@ ipcMain.handle('start-live-assist-session', async () => {
   }
 });
 
+// Pull-based counterpart to the 'active-assist-session' push above (fired on
+// 'did-finish-load' / 'renderer-ready') — see App.js's 'account-received'
+// handler. The push relies on the renderer already having an
+// ipcRenderer.on('active-assist-session', ...) listener registered at the
+// exact moment main.js decides to send; renderer-ready closed most of that
+// race but didn't fully eliminate it. invoke/handle has no equivalent
+// failure mode: it's a direct request/response over its own reply channel,
+// so it can't be silently dropped the way a push into a not-yet-registered
+// listener can. Hits the backend fresh each call rather than trusting the
+// pendingActiveAssistExpiresAt cache, so it's also immune to that cache
+// still being null because fetchActiveSessions hadn't resolved yet.
+ipcMain.handle('get-active-assist-session', async () => {
+  if (!sessionToken) return null;
+  try {
+    const sessions = await fetchActiveSessions(sessionToken);
+    const active = (sessions || []).find(s =>
+      s.sessionType === 'Live Assist' && s.assistExpiresAt && new Date(s.assistExpiresAt).getTime() > Date.now()
+    );
+    return active ? active.assistExpiresAt : null;
+  } catch (e) {
+    console.error('[sessions] get-active-assist-session failed:', e.message);
+    return null;
+  }
+});
+
 // Called from the renderer on explicit pause/quit (see App.js's
 // quitSession()). Also invoked internally (not via IPC) on system sleep and
 // app quit — see pauseLiveAssistSessionBestEffort below.
@@ -1050,6 +1118,17 @@ ipcMain.handle('end-trial-session', async () => {
     return await endTrialSession(sessionToken);
   } catch (e) {
     console.error('[sessions] end-trial-session failed:', e.message);
+    return { ok: false, status: 0, body: { message: e.message } };
+  }
+});
+
+// Called from FeedbackModal's submit() — { rating, message }.
+ipcMain.handle('submit-feedback', async (event, payload) => {
+  if (!sessionToken) return { ok: false, status: 0, body: { message: 'Not signed in' } };
+  try {
+    return await submitFeedback(sessionToken, payload);
+  } catch (e) {
+    console.error('[feedback] submit-feedback failed:', e.message);
     return { ok: false, status: 0, body: { message: e.message } };
   }
 });
