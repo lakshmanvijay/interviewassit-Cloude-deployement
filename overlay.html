@@ -289,11 +289,6 @@
   }
   .account-resume { font-size: 9px; color: var(--accent2); cursor: pointer; margin-top: 2px; }
   .account-resume:hover { text-decoration: underline; }
-  .logout-btn {
-    margin-top: 6px; border-color: var(--border);
-    background: rgba(255,255,255,0.04); color: var(--text-dim);
-  }
-  .logout-btn:hover { background: rgba(255,95,114,0.12); border-color: rgba(255,95,114,0.3); color: var(--danger); }
 
   /* ── WELCOME / PRE-SESSION SCREEN ── */
   .welcome-icon {
@@ -461,6 +456,24 @@
   }
   .setup-back { font-size: 9.5px; color: var(--text-dim); cursor: pointer; margin-top: -2px; }
   .setup-back:hover { color: var(--text); }
+
+  /* Setup screen's "‹ Back" — was a bare text link using the "‹" glyph,
+     which renders thin/misaligned across platforms. A small pill button
+     with an actual stroked chevron icon reads as a real, clickable control
+     instead. */
+  .back-btn {
+    align-self: flex-start; margin-top: -2px;
+    display: inline-flex; align-items: center; gap: 5px;
+    font-family: var(--sans); font-size: 10.5px; font-weight: 600;
+    color: var(--text-dim); background: rgba(255,255,255,0.03);
+    border: 1px solid var(--border); border-radius: 20px;
+    padding: 5px 12px 5px 9px; cursor: pointer; transition: all .15s;
+  }
+  .back-btn-icon { flex-shrink: 0; transition: transform .15s; }
+  .back-btn:hover {
+    background: rgba(99,255,180,0.08); border-color: rgba(99,255,180,0.3); color: var(--accent);
+  }
+  .back-btn:hover .back-btn-icon { transform: translateX(-2px); }
 
   .trial-btn {
     width: 100%; text-align: center; cursor: pointer;
