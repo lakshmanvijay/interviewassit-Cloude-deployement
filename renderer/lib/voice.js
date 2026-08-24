@@ -72,6 +72,17 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
 
   let sttSession = null;
 
+  // Set while a previous utterance's endUtterance() (STT finalize +
+  // handleTranscript) is still in flight — awaited by a new speech-start
+  // (see vadLoop's handleSpeechStart) before it decides continuation vs.
+  // new question. Without this, a quick pause-then-resume could race: STT
+  // finalize is a real network round trip (session.finish()), and
+  // lastQuestionAt/the conversation array only update once handleTranscript
+  // actually runs — a resumption detected before that finishes would see
+  // stale state and wrongly start a brand new question instead of
+  // continuing the one still being finalized.
+  let endUtterancePromise = null;
+
   function attachMeterEl(el) { meterEl = el; }
 
   function setVoiceStatus(text, cls) { store.setState({ voiceStatus: { text, cls: cls || '' } }); }
@@ -215,6 +226,42 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
     vadRafId = requestAnimationFrame(vadLoop);
   }
 
+  // Split out of vadLoop so it can await any in-flight endUtterance() before
+  // deciding continuation vs. new question — see endUtterancePromise's
+  // comment above for why that race existed. vadLoop itself stays a plain
+  // synchronous rAF callback (fire-and-forget call below), so the meter/
+  // energy sampling cadence is never blocked by this wait.
+  async function handleSpeechStart() {
+    if (endUtterancePromise) {
+      try { await endUtterancePromise; } catch (e) {}
+      // Listening may have been turned off, or this may have been a very
+      // short blip that's already over, while we were waiting.
+      if (!listening || !isSpeaking) return;
+    }
+
+    const conv = store.getState().conversation;
+    const lastMsg = conv[conv.length - 1];
+    const stillStreaming = !!(lastMsg && lastMsg.role === 'assistant' && lastMsg.streaming);
+    const withinWindow = lastQuestionAt > 0 && (Date.now() - lastQuestionAt) < CONTINUATION_WINDOW_MS;
+    const isContinuation = stillStreaming || withinWindow;
+
+    if (isContinuation) {
+      const userMsgs = conv.filter(m => m.role === 'user');
+      const prevUser = userMsgs[userMsgs.length - 1];
+      liveMsgId = prevUser.id;
+      continuationBase = prevUser.content;
+      if (onSpeechResumed) onSpeechResumed(liveMsgId);
+    } else {
+      liveMsgId = 'q_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+      continuationBase = '';
+    }
+    showLiveQuestion(isContinuation ? '' : '🔊 …');
+
+    const thisLiveId = liveMsgId;
+    scrollElIntoTop(() => document.querySelector(`[data-msg-id="${thisLiveId}"]`));
+    beginUtterance();
+  }
+
   function onAudioProcess(e) {
     if (!isSpeaking || !sttSession) return;
     const pcm16 = downsampleTo16kPCM16(e.data, audioCtx.sampleRate);
@@ -244,7 +291,14 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
       });
   }
 
-  async function endUtterance() {
+  function endUtterance() {
+    const p = doEndUtterance();
+    endUtterancePromise = p;
+    p.finally(() => { if (endUtterancePromise === p) endUtterancePromise = null; });
+    return p;
+  }
+
+  async function doEndUtterance() {
     const utteranceLiveMsgId = liveMsgId;
     const utteranceContinuationBase = continuationBase;
 
@@ -301,28 +355,7 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
         isSpeaking      = true;
         speechStartTime = Date.now();
         setVoiceStatus('speaking', 'speaking');
-
-        const conv = store.getState().conversation;
-        const lastMsg = conv[conv.length - 1];
-        const stillStreaming = !!(lastMsg && lastMsg.role === 'assistant' && lastMsg.streaming);
-        const withinWindow = lastQuestionAt > 0 && (Date.now() - lastQuestionAt) < CONTINUATION_WINDOW_MS;
-        const isContinuation = stillStreaming || withinWindow;
-
-        if (isContinuation) {
-          const userMsgs = conv.filter(m => m.role === 'user');
-          const prevUser = userMsgs[userMsgs.length - 1];
-          liveMsgId = prevUser.id;
-          continuationBase = prevUser.content;
-          if (onSpeechResumed) onSpeechResumed(liveMsgId);
-        } else {
-          liveMsgId = 'q_' + Date.now() + '_' + Math.random().toString(36).slice(2);
-          continuationBase = '';
-        }
-        showLiveQuestion(isContinuation ? '' : '🔊 …');
-
-        const thisLiveId = liveMsgId;
-        scrollElIntoTop(() => document.querySelector(`[data-msg-id="${thisLiveId}"]`));
-        beginUtterance();
+        handleSpeechStart();
       }
 
     } else if (isSpeaking) {
