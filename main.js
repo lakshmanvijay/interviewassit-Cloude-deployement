@@ -1,4 +1,4 @@
-const { app, BrowserWindow, globalShortcut, ipcMain, screen, Tray, Menu, nativeImage, session, desktopCapturer, shell, safeStorage, powerMonitor } = require('electron');
+const { app, BrowserWindow, globalShortcut, ipcMain, screen, Menu, session, desktopCapturer, shell, safeStorage, powerMonitor } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const log = require('electron-log');
 const path = require('path');
@@ -10,8 +10,8 @@ const https = require('https');
 // There's exactly one main process for the whole app — an uncaught
 // exception ANYWHERE in it (a stray IPC send to a disposed frame, a bad
 // network callback, anything) otherwise takes the entire app down
-// silently, including the tray icon. For a background/tray app that's
-// supposed to keep running, logging and continuing is the right default —
+// silently. For a background app that's supposed to keep running, logging
+// and continuing is the right default —
 // the alternative (crashing) is strictly worse for every error class this
 // app actually throws today. electron-log's file transport still hasn't
 // been configured yet at this point (that happens in setupAutoUpdater()),
@@ -122,7 +122,6 @@ app.on('open-url', (event, url) => {
 // its own server-side provider keys.
 
 let overlayWindow = null;
-let tray = null;
 let isOverlayVisible = true;
 // Set true only once a real quit is actually underway (see 'before-quit'
 // below) — lets the window's own 'close' handler tell an OS-level close
@@ -569,10 +568,10 @@ function createOverlayWindow() {
   // Alt+F4 (or any other OS-level close signal) sends a 'close' event
   // straight to this window, bypassing app.quit() entirely — previously
   // that fell through to 'window-all-closed' and silently killed the
-  // whole app, including the tray icon. Intercept it and just hide instead,
-  // same as the taskbar/tray "Toggle Overlay" behavior — unless a real
-  // quit is already underway (tray Quit, the titlebar's Close button,
-  // auto-update's quitAndInstall), in which case let it actually close.
+  // whole app. Intercept it and just hide instead, same as the
+  // Ctrl+Shift+H "Toggle Overlay" behavior — unless a real quit is already
+  // underway (the titlebar's Close button, auto-update's quitAndInstall),
+  // in which case let it actually close.
   overlayWindow.on('close', event => {
     if (!isQuitting) {
       event.preventDefault();
@@ -772,29 +771,6 @@ function fetchAccountFromApi(token) {
 
 
 // ─────────────────────────────────────────────
-// SYSTEM TRAY
-// ─────────────────────────────────────────────
-function createTray() {
-  const icon = nativeImage.createEmpty();
-  tray = new Tray(icon);
-
-  const contextMenu = Menu.buildFromTemplate([
-    {
-      label: 'Toggle Overlay (Ctrl+Shift+H)',
-      click: () => toggleOverlay()
-    },
-    { type: 'separator' },
-    {
-      label: 'Quit',
-      click: () => app.quit()
-    }
-  ]);
-
-  tray.setToolTip('VijayamAI — Hidden from screen share');
-  tray.setContextMenu(contextMenu);
-}
-
-// ─────────────────────────────────────────────
 // TOGGLE OVERLAY VISIBILITY
 // ─────────────────────────────────────────────
 function toggleOverlay() {
@@ -811,7 +787,7 @@ function toggleOverlay() {
 // ─────────────────────────────────────────────
 app.whenReady().then(() => {
   // No native menu bar is used anywhere in this app (frame: false, custom
-  // tray context menu instead) — removing Electron's default application
+  // in-window titlebar instead) — removing Electron's default application
   // menu entirely also removes its built-in "Toggle Developer Tools" role,
   // which otherwise keeps its Ctrl+Shift+I/F12 accelerators live even with
   // no menu bar visible. Harmless in dev too, so this isn't gated on
@@ -826,7 +802,6 @@ app.whenReady().then(() => {
   });
 
   createOverlayWindow();
-  createTray();
   if (app.isPackaged) setupAutoUpdater();
 
   // Restore a previous session instead of forcing the user through the
@@ -947,7 +922,7 @@ app.whenReady().then(() => {
   });
 });
 
-// Fires for every real quit path (tray Quit, the titlebar Close button,
+// Fires for every real quit path (the titlebar Close button,
 // quitAndInstall during auto-update) before any window actually closes —
 // this is what lets overlayWindow's own 'close' handler above tell an
 // intentional quit apart from an OS-level close signal (Alt+F4) that
