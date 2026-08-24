@@ -585,6 +585,18 @@ function createOverlayWindow() {
     overlayWindow = null;
   });
 
+  // Safety net for a renderer crash (e.g. the GPU-pipeline crash a
+  // degenerate desktop-capture frame or the old ScriptProcessorNode could
+  // trigger — see voice.js/pcm-worklet-processor.js) instead of silently
+  // leaving a dead/blank window: reload it in place so the app recovers
+  // rather than looking like it just vanished.
+  overlayWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error('[fatal] renderer process gone:', details.reason);
+    if (details.reason !== 'clean-exit' && overlayWindow && !overlayWindow.isDestroyed()) {
+      overlayWindow.webContents.reload();
+    }
+  });
+
   // Block native minimize — with skipTaskbar:true the window would disappear
   // with no way to restore. Redirect to our custom collapse instead.
   overlayWindow.on('minimize', () => {

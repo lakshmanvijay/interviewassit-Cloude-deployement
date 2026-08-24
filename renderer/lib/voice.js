@@ -1,6 +1,12 @@
 const { ipcRenderer } = require('electron');
+const path = require('path');
+const { pathToFileURL } = require('url');
 const { connectSttSession } = require('./sttSocket');
 const { scrollElIntoTop } = require('./scroll');
+
+// audioWorklet.addModule() needs a fetchable URL, not a require()'d module —
+// resolved once here relative to this file. See pcm-worklet-processor.js.
+const PCM_WORKLET_URL = pathToFileURL(path.join(__dirname, 'pcm-worklet-processor.js')).href;
 
 const VOICE_THRESHOLD  = 15;
 const SILENCE_MS_SHORT = 650;
@@ -48,7 +54,7 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
   let listening       = false;
   let audioCtx        = null;
   let analyserNode    = null;
-  let procNode        = null;
+  let workletNode     = null;
   let micStream       = null;
   let isSpeaking       = false;
   let silenceTimer     = null;
@@ -138,7 +144,11 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
           mandatory: {
             chromeMediaSource: 'desktop',
             chromeMediaSourceId: sourceId,
-            maxWidth: 1, maxHeight: 1, maxFrameRate: 1
+            // 16x16, not 1x1 — Chromium's I420 desktop-capture pipeline needs
+            // even width/height (chroma planes are half-resolution); a 1x1
+            // frame is a degenerate size that crashed the renderer outright.
+            // Track is stopped immediately below regardless, so this costs nothing.
+            maxWidth: 16, maxHeight: 16, maxFrameRate: 1
           }
         }
       });
@@ -148,7 +158,7 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
       listening = true;
       store.setState({ listening: true });
       setVoiceStatus('capturing internal audio', 'live');
-      startVAD(stream);
+      await startVAD(stream);
 
     } catch (err) {
       setVoiceStatus('Capture failed: ' + err.message.slice(0, 45), 'err');
@@ -165,10 +175,10 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
 
     if (sttSession) { sttSession.abort(); sttSession = null; }
 
-    if (procNode) {
-      try { procNode.disconnect(); } catch (e) {}
-      procNode.onaudioprocess = null;
-      procNode = null;
+    if (workletNode) {
+      try { workletNode.disconnect(); } catch (e) {}
+      workletNode.port.onmessage = null;
+      workletNode = null;
     }
     if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
     if (audioCtx)  { try { audioCtx.close(); } catch (e) {} audioCtx = null; }
@@ -179,7 +189,7 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
     setVadMeter(0);
   }
 
-  function startVAD(stream) {
+  async function startVAD(stream) {
     micStream    = stream;
     audioCtx     = new AudioContext();
     analyserNode = audioCtx.createAnalyser();
@@ -192,17 +202,22 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
     vadLo = Math.max(0, Math.floor(300  / binHz));
     vadHi = Math.min(vadFreqBuf.length - 1, Math.ceil(3400 / binHz));
 
-    procNode = audioCtx.createScriptProcessor(4096, 1, 1);
-    source.connect(procNode);
-    procNode.connect(audioCtx.destination);
-    procNode.onaudioprocess = onAudioProcess;
+    // Raw PCM tap via AudioWorkletNode, not the deprecated (and crash-prone
+    // on some machines — see pcm-worklet-processor.js) ScriptProcessorNode.
+    // Connecting to destination keeps it pulled/running reliably even though
+    // the output is never written to (silent — mic isn't looped to speakers).
+    await audioCtx.audioWorklet.addModule(PCM_WORKLET_URL);
+    workletNode = new AudioWorkletNode(audioCtx, 'vad-processor', { processorOptions: { bufferSize: 4096 } });
+    workletNode.port.onmessage = onAudioProcess;
+    source.connect(workletNode);
+    workletNode.connect(audioCtx.destination);
 
     vadRafId = requestAnimationFrame(vadLoop);
   }
 
   function onAudioProcess(e) {
     if (!isSpeaking || !sttSession) return;
-    const pcm16 = downsampleTo16kPCM16(e.inputBuffer.getChannelData(0), audioCtx.sampleRate);
+    const pcm16 = downsampleTo16kPCM16(e.data, audioCtx.sampleRate);
     sttSession.sendAudio(pcm16.buffer);
   }
 
