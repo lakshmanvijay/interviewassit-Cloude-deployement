@@ -510,6 +510,11 @@ function createOverlayWindow() {
     transparent: true,
     alwaysOnTop: true,
     skipTaskbar: true,
+    // Same file electron-builder embeds into the packaged .exe (see
+    // package.json's build.win.icon) — set here too so an unpackaged dev
+    // run (`npm start` / `electron .`) shows real branding instead of the
+    // generic Electron icon in Task Manager/Alt-Tab.
+    icon: path.join(__dirname, 'assets', 'icon.ico'),
     resizable: true,
     movable: true,
     // Reverted back to focusable — a non-focusable window (the earlier
