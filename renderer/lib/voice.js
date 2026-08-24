@@ -1,6 +1,13 @@
 const { ipcRenderer } = require('electron');
+const path = require('path');
+const { pathToFileURL } = require('url');
 const { connectSttSession } = require('./sttSocket');
 const { scrollElIntoTop } = require('./scroll');
+
+// AudioWorklet module URL for the raw-PCM tap (replaces the deprecated
+// ScriptProcessorNode) — resolved once at load time relative to this file,
+// not require()'d, since audioWorklet.addModule() needs a fetchable URL.
+const PCM_WORKLET_URL = pathToFileURL(path.join(__dirname, 'pcm-worklet-processor.js')).href;
 
 const VOICE_THRESHOLD  = 15;    // energy level above which we consider the user to be speaking
 // Trimmed down from 1150/2500 — this silence wait is pure dead time added on
@@ -22,7 +29,7 @@ const NOISE_PHRASES = [
   '[blank_audio]', '[silence]', '...',
 ];
 
-// Downsamples one ScriptProcessorNode callback's worth of Float32 samples
+// Downsamples one PCM-tap-worklet chunk's worth of Float32 samples
 // (at the AudioContext's native rate, typically 44.1/48 kHz) to 16 kHz mono
 // Int16 PCM — the format the live STT socket streams. Simple box-filter
 // averaging per output sample; good enough for speech, no external deps.
@@ -62,7 +69,7 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
   let listening       = false;
   let audioCtx        = null;
   let analyserNode    = null;
-  let procNode        = null;
+  let workletNode     = null;
   let micStream       = null;
   let isSpeaking       = false;
   let silenceTimer     = null;
@@ -195,7 +202,15 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
           mandatory: {
             chromeMediaSource: 'desktop',
             chromeMediaSourceId: sourceId,
-            maxWidth: 1, maxHeight: 1, maxFrameRate: 1
+            // 16x16, not 1x1 — Chromium's desktop-capture frames go through
+            // its I420 (YUV 4:2:0) pipeline, which requires even width/height
+            // since chroma planes are subsampled at half resolution. A 1x1
+            // frame is a degenerate/odd size that crashes the GPU/renderer
+            // process on Windows (the whole app dies with no JS-catchable
+            // error — this is what caused the app to vanish right after
+            // starting a session). This track is stopped immediately below
+            // regardless, so the larger size costs nothing.
+            maxWidth: 16, maxHeight: 16, maxFrameRate: 1
           }
         }
       });
@@ -205,7 +220,7 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
       listening = true;
       store.setState({ listening: true });
       setVoiceStatus('capturing internal audio', 'live');
-      startVAD(stream);
+      await startVAD(stream);
 
     } catch (err) {
       setVoiceStatus('Capture failed: ' + err.message.slice(0, 45), 'err');
@@ -222,10 +237,10 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
 
     if (sttSession) { sttSession.abort(); sttSession = null; }
 
-    if (procNode) {
-      try { procNode.disconnect(); } catch (e) {}
-      procNode.onaudioprocess = null;
-      procNode = null;
+    if (workletNode) {
+      try { workletNode.disconnect(); } catch (e) {}
+      workletNode.port.onmessage = null;
+      workletNode = null;
     }
     if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
     if (audioCtx)  { try { audioCtx.close(); } catch (e) {} audioCtx = null; }
@@ -236,7 +251,7 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
     setVadMeter(0);
   }
 
-  function startVAD(stream) {
+  async function startVAD(stream) {
     micStream    = stream;
     audioCtx     = new AudioContext();
     analyserNode = audioCtx.createAnalyser();
@@ -251,22 +266,25 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
     vadHi = Math.min(vadFreqBuf.length - 1, Math.ceil(3400 / binHz));
 
     // Raw PCM tap — runs continuously (like analyserNode) rather than being
-    // created/destroyed per utterance, since ScriptProcessorNode setup mid
-    // VAD-detected-speech would risk missing the very first audio callback.
-    // Connecting to destination keeps onaudioprocess firing reliably even
-    // though the output is never written to (silent — mic isn't looped to
-    // speakers).
-    procNode = audioCtx.createScriptProcessor(4096, 1, 1);
-    source.connect(procNode);
-    procNode.connect(audioCtx.destination);
-    procNode.onaudioprocess = onAudioProcess;
+    // created/destroyed per utterance, since setup mid VAD-detected-speech
+    // would risk missing the very first audio callback. Uses AudioWorkletNode
+    // (off-main-thread, not the deprecated ScriptProcessorNode) — see
+    // pcm-worklet-processor.js. Connecting to destination keeps it pulled/
+    // running reliably even though the output is never written to (silent —
+    // mic isn't looped to speakers).
+    await audioCtx.audioWorklet.addModule(PCM_WORKLET_URL);
+    workletNode = new AudioWorkletNode(audioCtx, 'pcm-tap-processor');
+    workletNode.port.onmessage = onAudioProcess;
+    source.connect(workletNode);
+    workletNode.connect(audioCtx.destination);
 
     vadRafId = requestAnimationFrame(vadLoop);
   }
 
   function onAudioProcess(e) {
     if (!isSpeaking || !sttSession) return;
-    const pcm16 = downsampleTo16kPCM16(e.inputBuffer.getChannelData(0), audioCtx.sampleRate);
+    // e.data is the Float32Array chunk posted by pcm-worklet-processor.js
+    const pcm16 = downsampleTo16kPCM16(e.data, audioCtx.sampleRate);
     sttSession.sendAudio(pcm16.buffer);
   }
 

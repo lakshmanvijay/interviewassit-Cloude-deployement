@@ -563,6 +563,17 @@ function createOverlayWindow() {
     overlayWindow = null;
   });
 
+  // Safety net for a renderer crash (e.g. a GPU-pipeline crash from desktop
+  // capture) instead of silently leaving a dead/blank window — reload it in
+  // place so the app recovers rather than looking like it just vanished.
+  // 'crashed'/'clean-exit'=false only; a normal reload/navigation isn't this.
+  overlayWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error('[fatal] renderer process gone:', details.reason);
+    if (details.reason !== 'clean-exit' && overlayWindow && !overlayWindow.isDestroyed()) {
+      overlayWindow.webContents.reload();
+    }
+  });
+
   // Block native minimize — with skipTaskbar:true the window would disappear
   // with no way to restore. Redirect to our custom collapse instead.
   overlayWindow.on('minimize', () => {
