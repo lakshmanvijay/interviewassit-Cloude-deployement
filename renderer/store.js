@@ -31,6 +31,7 @@ const store = createStore({
   proficiencyLevel: 'intermediate',  // 'basic' | 'intermediate' | 'advanced' — shapes answer language, see lib/prompts.js
   conversation: [],        // [{ id, role, content, streaming }]
   navIndex: -1,
+  pinnedMessageId: null,   // id of the user message currently pinned to the top of Conversation (see PinnedQuestion.js) — null when nothing's pinned
   pendingScreenshots: [],
   listening: false,
   autoAsk: true,

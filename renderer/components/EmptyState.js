@@ -264,14 +264,17 @@ function EmptyState({ store, onToggleListen, onStartTrial }) {
           </button>
         `}
 
-        <!-- Free trial is only for someone with nothing else to fall back on: hidden the moment
-             they have an active paid window (windowTimer — an open session row OR an already-
-             activated credit lot with time left, see its own comment above) OR any usable credit
-             lot at all (noCredits is false — see hasNoCredits(), which counts dormant/unactivated
-             lots too, not just an already-active one), even if that lot hasn't been activated yet.
-             The trial is meant strictly for users with zero credits and no active window, not a
-             bonus on top of paid credits. -->
-        ${!windowTimer && noCredits && html`
+        <!-- Free trial visibility is keyed on windowTimer (an open session row OR an already-
+             activated credit lot with time left, see its own comment above) alone, not on
+             creditBalance/noCredits — a user who HAS paid credits but hasn't activated any of
+             them yet still gets offered the trial, same as someone with zero credits at all.
+             It only disappears once they actually activate a window; from then on it stays
+             hidden until that window's balance/expiry runs out (windowTimer goes falsy again),
+             at which point it's back to being offered again same as before anything was ever
+             activated. Was previously also gated on noCredits (hiding the trial for anyone with
+             ANY usable credit lot, even a dormant one) — changed on purpose: dormant credits
+             the user hasn't chosen to spend yet shouldn't block them from using the trial first. -->
+        ${!windowTimer && html`
           <button class="trial-btn" disabled=${!trial.eligible} onClick=${onStartTrial}>
             <span>🎁</span> ${trial.eligible ? '10-minute free trial' : `Free trial available in ${trial.remainingLabel}`}
           </button>

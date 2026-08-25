@@ -3,6 +3,7 @@ const { html } = require('./html');
 const { useRef, useEffect } = require('preact/hooks');
 
 const { trialUsedAtKey } = require('./store');
+const { useStoreSlice } = require('./hooks');
 const { getSystemPrompt } = require('./lib/prompts');
 const { connect: connectInterviewSocket, disconnect: disconnectInterviewSocket, askBackend, cancelQuestion, CANCELLED_ERROR } = require('./lib/interviewSocket');
 const { screenAnalyze } = require('./lib/screenAnalyze');
@@ -19,6 +20,7 @@ const { FeedbackModal } = require('./components/FeedbackModal');
 const { StatusWarning } = require('./components/StatusWarning');
 const { UpdateBanner } = require('./components/UpdateBanner');
 const { VoiceBar } = require('./components/VoiceBar');
+const { PinnedQuestion } = require('./components/PinnedQuestion');
 const { Conversation } = require('./components/Conversation');
 const { InputArea } = require('./components/InputArea');
 
@@ -278,7 +280,7 @@ function App({ store }) {
   }
 
   function clearConversation() {
-    store.setState({ conversation: [], navIndex: -1 });
+    store.setState({ conversation: [], navIndex: -1, pinnedMessageId: null });
   }
 
   // Pending auto-quit for an in-progress free trial (see startTrial below).
@@ -398,6 +400,46 @@ function App({ store }) {
       quitSession();
     }, Math.max(0, msLeft));
   }
+
+  // Same auto-quit the trial gets above, but for the PAID window — without
+  // this, once assistExpiresAt passes, the countdown badge (hooks.js's
+  // useAssistCountdown) just goes blank since it returns null past expiry,
+  // but the session/overlay itself kept running: every question kept
+  // silently failing against the now-closed window instead of the app
+  // actually ending it. assistExpiresAt gets set from several places (start/
+  // continue in EmptyState.js, the 'active-assist-session' restore push, the
+  // Activate response handler below) unlike the trial's single call site, so
+  // this watches the store field itself and (re)arms one timer for whatever
+  // it currently is, rather than needing a setTimeout at every setter.
+  const assistExpiresAt = useStoreSlice(store, s => s.assistExpiresAt);
+  useEffect(() => {
+    if (!assistExpiresAt) return;
+    const msLeft = new Date(assistExpiresAt).getTime() - Date.now();
+    if (msLeft <= 0) { quitSession(); return; }
+    const timerId = setTimeout(() => quitSession(), msLeft);
+    return () => clearTimeout(timerId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [assistExpiresAt]);
+
+  // Extra safety net alongside the assistExpiresAt timer above: that one
+  // only fires once ITS OWN window's clock runs out, but creditBalance
+  // (refreshed after every Activate/Pause — see the listeners below) is the
+  // actual source of truth for "is there anything left to spend at all". If
+  // it ever reads zero while a session is actively running, end it right
+  // away rather than relying solely on the window timer, which could in
+  // principle be stale or missing (e.g. a session the backend auto-opened
+  // via recordQuestion's auto-start path without this client having
+  // received a fresh assistExpiresAt for it). Trial sessions are exempt —
+  // a trial legitimately runs on 0 paid credits by definition and is
+  // already gated by its own trialExpiresAt timer instead.
+  const creditBalance = useStoreSlice(store, s => s.creditBalance);
+  const sessionStarted = useStoreSlice(store, s => s.sessionStarted);
+  useEffect(() => {
+    if (!sessionStarted || !creditBalance) return;
+    if (store.getState().trialExpiresAt) return; // trial — gated by its own timer instead
+    if (creditBalance.totalMinutesAvailable <= 0) quitSession();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [creditBalance, sessionStarted]);
 
   // Only the background panel fades with this — text/icons/borders are
   // fixed, fully-legible colors in overlay.html's CSS and never dim, unlike
@@ -603,6 +645,7 @@ function App({ store }) {
       <${StatusWarning} store=${store} />
       <${UpdateBanner} store=${store} onRestart=${() => ipcRenderer.send('restart-and-install')} />
       <${VoiceBar} store=${store} voiceController=${voiceControllerRef.current} />
+      <${PinnedQuestion} store=${store} />
       <${Conversation} store=${store} containerRef=${conversationRef} onToggleListen=${() => voiceControllerRef.current.toggleListen()} onStartTrial=${startTrial} />
       <${InputArea} store=${store} inputRef=${inputRef} onSend=${sendMessage} />
     </div>

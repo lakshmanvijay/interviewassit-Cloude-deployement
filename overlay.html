@@ -10,6 +10,27 @@
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
+  /* The OS mouse cursor is drawn by the compositor, not by this window's
+     own (capture-excluded) content — so even though the overlay itself is
+     invisible in a screen share, the cursor shape switching to a hand
+     every time it passes over a button is NOT excluded, and is a visible
+     tell to anyone watching the share: an interviewer sees the cursor
+     keep flipping to a pointer over what looks to them like empty desktop,
+     with nothing there to explain why. Force it to stay the plain arrow
+     everywhere, unconditionally — !important is deliberate here, since the
+     goal is to override every individual `cursor: pointer` below (and any
+     native default browsers apply to <a>/<select>/checkboxes regardless of
+     author CSS) in one place, rather than hunting down and editing each one. */
+  *, *::before, *::after { cursor: default !important; }
+  /* Exception: real free-text fields (the question box, the feedback
+     textarea) still need the I-beam text cursor — losing it would make it
+     impossible to tell where a click will actually place the caret. This is
+     a different, unrelated affordance from the hand/pointer problem above
+     (an I-beam over a text field reads as completely ordinary anywhere, not
+     as a suspicious "there's a button here" tell), so it's carved out
+     separately rather than folded into the blanket default above. */
+  textarea, input[type="text"], input[type="search"] { cursor: text !important; }
+
   :root {
     /* Only the background panel fades with the opacity slider — text,
        icons and borders stay at fixed, fully-legible colors below, since
@@ -250,6 +271,56 @@
     white-space: nowrap; text-transform: uppercase; letter-spacing: .06em;
   }
   .auto-toggle input { accent-color: var(--accent); cursor: pointer; }
+
+  .pin-toggle-btn {
+    flex-shrink: 0; width: 20px; height: 20px; padding: 0;
+    border-radius: 5px; border: 1px solid transparent; background: transparent;
+    font-size: 11px; line-height: 1; cursor: pointer; opacity: .55;
+    display: flex; align-items: center; justify-content: center;
+    transition: all .15s;
+  }
+  .pin-toggle-btn:hover { opacity: 1; background: rgba(255,255,255,0.06); }
+  .pin-toggle-btn.active {
+    opacity: 1; background: rgba(99,255,180,0.12); border-color: rgba(99,255,180,0.35);
+  }
+
+  /* ── PINNED QUESTION — sticky above #conversation (see PinnedQuestion.js),
+     lets a coding question stay visible while the interviewer's next
+     question(s) push it down out of the normal scrolling list below. ── */
+  #pinned-question {
+    flex-shrink: 0; margin: 10px 12px 0; padding: 8px 10px;
+    background: rgba(99,255,180,0.06); border: 1px solid rgba(99,255,180,0.25);
+    border-radius: 8px; display: flex; flex-direction: column; gap: 5px;
+    /* 40% of #app's height scales with the window at any size, but on a
+       very short window (near OVERLAY_MIN_HEIGHT — see main.js) that alone
+       could still squeeze #conversation below it down to almost nothing;
+       the cap keeps this panel from ever eating more than a sensible fixed
+       amount of space no matter how tall the window gets either. */
+    max-height: min(40%, 260px); overflow-y: auto;
+  }
+  /* Same thin, near-invisible scrollbar as #conversation (the AI-answer
+     area) below — was using the browser's default scrollbar here, which
+     stood out as a chunky mismatched bar against the rest of the app. */
+  #pinned-question::-webkit-scrollbar { width: 3px; }
+  #pinned-question::-webkit-scrollbar-track { background: transparent; }
+  #pinned-question::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+  .pinned-header {
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 8.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--accent);
+  }
+  .pinned-unpin {
+    background: transparent; border: none; color: var(--text-dim);
+    font-size: 11px; line-height: 1; cursor: pointer; padding: 1px 3px;
+    border-radius: 4px; transition: all .15s;
+  }
+  .pinned-unpin:hover { color: var(--danger); background: rgba(255,95,114,0.1); }
+  .pinned-question-text { font-size: 11px; color: var(--text); font-weight: 600; line-height: 1.4; }
+  /* Separator above the answer only — the answer's own box/text styling
+     comes from .message-content (reused as-is from the main conversation,
+     see PinnedQuestion.js) so code blocks render identically here. */
+  .pinned-answer { padding-top: 5px; border-top: 1px solid var(--border); }
+  .pinned-answer .message-content { font-size: 11px; padding: 8px 10px; }
 
   /* ── VAD METER ── */
   #vad-meter {
