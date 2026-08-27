@@ -15,6 +15,16 @@ const FINALIZE_TIMEOUT_MS = 8000;
 // to complete, so if it's still not ready, blocking the UI for the full
 // connect timeout (8s) is worse than just failing this utterance fast.
 const FINALIZE_READY_GRACE_MS = 1200;
+// finish() sends "stop" and then, ideally, would just use whatever Deepgram's
+// authoritative close-triggered flush hands back. But that's a real network
+// round trip (client -> Railway -> Deepgram -> Railway -> client), and the
+// live transcript (see bestGuessText below) has already been streaming in
+// throughout the utterance — by the time silence is detected, it's usually
+// complete or a word short. Capping the wait here turns "answer after a full
+// finalize round trip" into "answer after ~this long", at the cost of
+// occasionally trimming the very last word if Deepgram's real finalize was
+// still pending — see the bestGuessText fallback in finish().
+const FINALIZE_SETTLE_MS = 600;
 
 // Returns a session object before the connection is even open. sendAudio()
 // is safe to call right away — audio sent before the server acks "ready" is
@@ -42,6 +52,12 @@ function connectSttSession(language, onPartial) {
   const closedPromise = new Promise(res => { closeResolve = res; });
 
   let finalText = '';
+  // Locked-in final segments + whatever's still being recognized right now —
+  // the same value onPartial() gets for live captions. Kept independent of
+  // onPartial (which is optional) so finish() always has a live "best guess"
+  // to fall back on if Deepgram's authoritative finalize doesn't land within
+  // FINALIZE_SETTLE_MS.
+  let bestGuessText = '';
   let errorMessage = null;
   let serverReady = false;
   // Audio captured before the server acks "ready" (token/URL IPC round
@@ -96,13 +112,14 @@ function connectSttSession(language, onPartial) {
         if (msg.isFinal && msg.text) {
           finalText = finalText ? `${finalText} ${msg.text}`.trim() : msg.text;
         }
-        // Live caption: whether this segment is final or still interim,
-        // surface locked-in text + the in-progress segment as one growing
-        // string, so onPartial always gets "the best guess of the full
-        // utterance so far" rather than just the latest fragment.
-        if (onPartial && msg.text != null) {
-          const live = msg.isFinal ? finalText : (finalText ? `${finalText} ${msg.text}`.trim() : msg.text);
-          onPartial(live);
+        // Best guess of the whole utterance so far: locked-in final segments
+        // + whatever's still being recognized. Whether this segment is final
+        // or still interim, this is "the best guess of the full utterance so
+        // far" rather than just the latest fragment — used for live captions
+        // (onPartial) and as finish()'s fallback if the real finalize is slow.
+        if (msg.text != null) {
+          bestGuessText = msg.isFinal ? finalText : (finalText ? `${finalText} ${msg.text}`.trim() : msg.text);
+          if (onPartial) onPartial(bestGuessText);
         }
       } else if (msg.type === 'error') {
         errorMessage = msg.message || 'STT error';
@@ -159,11 +176,29 @@ function connectSttSession(language, onPartial) {
         return { text: finalText, error: errorMessage };
       }
       try { ws.send(JSON.stringify({ type: 'stop' })); } catch (e) {}
-      await Promise.race([
-        closedPromise,
-        new Promise(res => setTimeout(res, FINALIZE_TIMEOUT_MS)),
+
+      // Give Deepgram's authoritative close-triggered flush a short window —
+      // most of the transcript is already in bestGuessText from live interim
+      // results, so this is just waiting to see if a trailing final segment
+      // lands. If it doesn't land in time, don't block the caller on the
+      // full round trip (see FINALIZE_SETTLE_MS): hand back bestGuessText
+      // and let the socket keep running in the background so Deepgram's real
+      // finalize isn't cut off mid-flight (closing now could truncate
+      // whatever it's still sending) — FINALIZE_TIMEOUT_MS remains as a hard
+      // cap so the socket doesn't linger forever if it never closes on its own.
+      const finalized = await Promise.race([
+        closedPromise.then(() => true),
+        new Promise(res => setTimeout(() => res(false), FINALIZE_SETTLE_MS)),
       ]);
-      if (ws && ws.readyState !== WebSocket.CLOSED) { try { ws.close(); } catch (e) {} }
+
+      if (!finalized) {
+        setTimeout(() => {
+          if (ws && ws.readyState !== WebSocket.CLOSED) { try { ws.close(); } catch (e) {} }
+        }, FINALIZE_TIMEOUT_MS);
+        return { text: bestGuessText || finalText, error: errorMessage };
+      }
+
+      if (ws.readyState !== WebSocket.CLOSED) { try { ws.close(); } catch (e) {} }
       return { text: finalText, error: errorMessage };
     },
 
