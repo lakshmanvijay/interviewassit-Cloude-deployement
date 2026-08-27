@@ -9,7 +9,7 @@ const { scrollElIntoTop } = require('./scroll');
 const PCM_WORKLET_URL = pathToFileURL(path.join(__dirname, 'pcm-worklet-processor.js')).href;
 
 const VOICE_THRESHOLD  = 15;
-const SILENCE_MS_SHORT = 650;
+const SILENCE_MS_SHORT = 800;
 const SILENCE_MS_LONG  = 1800;
 const MIN_STT_INTERVAL_MS = 1000;
 
@@ -68,7 +68,7 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
   let meterEl    = null;
 
   let lastQuestionAt = 0;
-  const CONTINUATION_WINDOW_MS = 6000;
+  const CONTINUATION_WINDOW_MS = 4000;
 
   let sttSession = null;
 
