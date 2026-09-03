@@ -6,7 +6,15 @@ function VoiceBar({ store, voiceController }) {
   const voiceStatus    = useStoreSlice(store, s => s.voiceStatus);
   const liveTranscript = useStoreSlice(store, s => s.liveTranscript);
   const autoAsk        = useStoreSlice(store, s => s.autoAsk);
-  const pinnedMessageId = useStoreSlice(store, s => s.pinnedMessageId);
+  const pinnedIds       = useStoreSlice(store, s => s.pinnedIds);
+  // Id of the most recent user message — read via a subscribed selector
+  // (not store.getState() in the render body) so the pin button's "already
+  // pinned" state actually updates when a new question comes in, not just
+  // whenever some other prop happens to re-render this component.
+  const currentQuestionId = useStoreSlice(store, s => {
+    const lastUser = [...s.conversation].reverse().find(m => m.role === 'user');
+    return lastUser ? lastUser.id : null;
+  });
   const collapsed      = useStoreSlice(store, s => s.collapsed);
   // Same gate InputArea.js already uses — this bar was only ever hidden via
   // `collapsed`, so it stayed fully visible (showing whatever voiceStatus
@@ -28,20 +36,23 @@ function VoiceBar({ store, voiceController }) {
 
   if (!sessionStarted) return null;
 
-  // Pins whichever question is most recent right now (so it stays visible
-  // at the top — see PinnedQuestion.js — while the interviewer keeps asking
-  // more, which would otherwise push it down out of view mid-answer/mid-
-  // code). Clicking again while something's already pinned just unpins it,
-  // same as the ✕ on the pinned panel itself.
-  function togglePin() {
-    if (pinnedMessageId) {
-      store.setState({ pinnedMessageId: null });
+  // Pins whichever question is most recent right now, adding it as a new tab
+  // (see PinnedTabs.js/PinnedQuestion.js) — any number can be pinned at
+  // once, unlike the old single-pin behavior. If that question is already
+  // pinned, this just re-opens its panel instead of pinning a duplicate.
+  // Unpinning a tab entirely is done from the tab itself (its own ✕), not
+  // from this button.
+  function pinCurrent() {
+    if (!currentQuestionId) return;
+    const { pinnedIds: ids, openPinnedIds: open } = store.getState();
+    if (ids.includes(currentQuestionId)) {
+      if (!open.includes(currentQuestionId)) store.setState({ openPinnedIds: [...open, currentQuestionId] });
       return;
     }
-    const conv = store.getState().conversation;
-    const lastUser = [...conv].reverse().find(m => m.role === 'user');
-    if (lastUser) store.setState({ pinnedMessageId: lastUser.id });
+    store.setState({ pinnedIds: [...ids, currentQuestionId], openPinnedIds: [...open, currentQuestionId] });
   }
+
+  const currentIsPinned = !!currentQuestionId && pinnedIds.includes(currentQuestionId);
 
   return html`
     <div id="voice-bar" style=${collapsed ? 'display:none' : ''}>
@@ -61,9 +72,9 @@ function VoiceBar({ store, voiceController }) {
       </label>
       <button
         type="button"
-        class="pin-toggle-btn ${pinnedMessageId ? 'active' : ''}"
-        title=${pinnedMessageId ? 'Unpin question' : 'Pin current question to top'}
-        onClick=${togglePin}
+        class="pin-toggle-btn ${currentIsPinned ? 'active' : ''}"
+        title=${currentIsPinned ? 'Current question already pinned' : 'Pin current question as a tab'}
+        onClick=${pinCurrent}
       >📌</button>
     </div>
   `;

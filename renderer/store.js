@@ -31,7 +31,8 @@ const store = createStore({
   proficiencyLevel: 'intermediate',  // 'basic' | 'intermediate' | 'advanced' — shapes answer language, see lib/prompts.js
   conversation: [],        // [{ id, role, content, streaming }]
   navIndex: -1,
-  pinnedMessageId: null,   // id of the user message currently pinned to the top of Conversation (see PinnedQuestion.js) — null when nothing's pinned
+  pinnedIds: [],           // ordered ids of user messages pinned as tabs beside VoiceBar (see PinnedTabs.js) — any number at once
+  openPinnedIds: [],       // subset of pinnedIds whose panel is currently expanded (see PinnedQuestion.js) — clicking a tab toggles its own membership here
   pendingScreenshots: [],
   listening: false,
   autoAsk: true,

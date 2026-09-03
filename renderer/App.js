@@ -20,6 +20,7 @@ const { FeedbackModal } = require('./components/FeedbackModal');
 const { StatusWarning } = require('./components/StatusWarning');
 const { UpdateBanner } = require('./components/UpdateBanner');
 const { VoiceBar } = require('./components/VoiceBar');
+const { PinnedTabs } = require('./components/PinnedTabs');
 const { PinnedQuestion } = require('./components/PinnedQuestion');
 const { Conversation } = require('./components/Conversation');
 const { InputArea } = require('./components/InputArea');
@@ -280,7 +281,7 @@ function App({ store }) {
   }
 
   function clearConversation() {
-    store.setState({ conversation: [], navIndex: -1, pinnedMessageId: null });
+    store.setState({ conversation: [], navIndex: -1, pinnedIds: [], openPinnedIds: [] });
   }
 
   // Pending auto-quit for an in-progress free trial (see startTrial below).
@@ -645,6 +646,7 @@ function App({ store }) {
       <${StatusWarning} store=${store} />
       <${UpdateBanner} store=${store} onRestart=${() => ipcRenderer.send('restart-and-install')} />
       <${VoiceBar} store=${store} voiceController=${voiceControllerRef.current} />
+      <${PinnedTabs} store=${store} />
       <${PinnedQuestion} store=${store} />
       <${Conversation} store=${store} containerRef=${conversationRef} onToggleListen=${() => voiceControllerRef.current.toggleListen()} onStartTrial=${startTrial} />
       <${InputArea} store=${store} inputRef=${inputRef} onSend=${sendMessage} />

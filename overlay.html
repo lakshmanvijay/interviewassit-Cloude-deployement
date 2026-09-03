@@ -284,26 +284,55 @@
     opacity: 1; background: rgba(99,255,180,0.12); border-color: rgba(99,255,180,0.35);
   }
 
+  /* ── PINNED TABS — one per pinned question, sits right under #voice-bar
+     (the "speaking line"), see PinnedTabs.js. Clicking a tab opens/closes
+     its own panel below (.pinned-question); its ✕ unpins it entirely. ── */
+  #pinned-tabs {
+    display: flex; flex-wrap: wrap; gap: 5px;
+    padding: 6px 12px 0;
+  }
+  .pinned-tab {
+    display: flex; align-items: center; gap: 5px;
+    background: rgba(255,255,255,0.04); border: 1px solid var(--border);
+    border-radius: 6px; padding: 3px 4px 3px 8px;
+    font-family: var(--mono); font-size: 9.5px; color: var(--text-dim);
+    cursor: pointer; transition: all .15s; max-width: 160px;
+  }
+  .pinned-tab:hover { background: rgba(255,255,255,0.07); }
+  .pinned-tab.open {
+    background: rgba(99,255,180,0.1); border-color: rgba(99,255,180,0.35); color: var(--text);
+  }
+  .pinned-tab-label {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+  }
+  .pinned-tab-close {
+    flex-shrink: 0; padding: 1px 3px; border-radius: 4px; line-height: 1;
+    color: var(--text-dimmer); transition: all .15s;
+  }
+  .pinned-tab-close:hover { color: var(--danger); background: rgba(255,95,114,0.15); }
+
   /* ── PINNED QUESTION — sticky above #conversation (see PinnedQuestion.js),
      lets a coding question stay visible while the interviewer's next
-     question(s) push it down out of the normal scrolling list below. ── */
-  #pinned-question {
-    flex-shrink: 0; margin: 10px 12px 0; padding: 8px 10px;
+     question(s) push it down out of the normal scrolling list below. One of
+     these renders per open tab above, stacked in pin order. ── */
+  .pinned-question {
+    flex-shrink: 0; margin: 8px 12px 0; padding: 8px 10px;
     background: rgba(99,255,180,0.06); border: 1px solid rgba(99,255,180,0.25);
     border-radius: 8px; display: flex; flex-direction: column; gap: 5px;
     /* 40% of #app's height scales with the window at any size, but on a
        very short window (near OVERLAY_MIN_HEIGHT — see main.js) that alone
        could still squeeze #conversation below it down to almost nothing;
-       the cap keeps this panel from ever eating more than a sensible fixed
-       amount of space no matter how tall the window gets either. */
+       the cap keeps each panel from ever eating more than a sensible fixed
+       amount of space no matter how tall the window gets either — capped
+       per-panel rather than as a group, same as before multiple could stack. */
     max-height: min(40%, 260px); overflow-y: auto;
   }
   /* Same thin, near-invisible scrollbar as #conversation (the AI-answer
      area) below — was using the browser's default scrollbar here, which
      stood out as a chunky mismatched bar against the rest of the app. */
-  #pinned-question::-webkit-scrollbar { width: 3px; }
-  #pinned-question::-webkit-scrollbar-track { background: transparent; }
-  #pinned-question::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+  .pinned-question::-webkit-scrollbar { width: 3px; }
+  .pinned-question::-webkit-scrollbar-track { background: transparent; }
+  .pinned-question::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
   .pinned-header {
     display: flex; align-items: center; justify-content: space-between;
     font-size: 8.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
@@ -732,8 +761,9 @@
     display: flex; flex-direction: column; gap: 8px;
     flex-shrink: 0; background: rgba(0,0,0,0.2);
   }
+  .input-row { display: flex; align-items: flex-end; gap: 8px; }
   #prompt-input {
-    width: 100%; background: rgba(255,255,255,0.04);
+    flex: 1; min-width: 0; background: rgba(255,255,255,0.04);
     border: 1px solid var(--border); border-radius: 8px;
     padding: 9px 12px; font-family: var(--mono); font-size: 11px;
     color: var(--text); resize: none; outline: none;
@@ -742,13 +772,12 @@
   }
   #prompt-input::placeholder { color: var(--text-dimmer); }
   #prompt-input:focus { border-color: rgba(99,255,180,0.3); background: rgba(255,255,255,0.06); }
-  .input-footer { display: flex; align-items: center; justify-content: space-between; }
-  .input-hint { font-size: 9px; color: var(--text-dimmer); }
   #send-btn {
-    background: rgba(99,255,180,0.12); border: 1px solid rgba(99,255,180,0.3);
+    flex-shrink: 0; background: rgba(99,255,180,0.12); border: 1px solid rgba(99,255,180,0.3);
     border-radius: 7px; color: var(--accent); font-family: var(--mono);
     font-size: 11px; font-weight: 600; padding: 6px 16px;
     cursor: pointer; transition: all .15s; letter-spacing: .04em;
+    height: 34px;
   }
   #send-btn:hover { background: rgba(99,255,180,0.2); box-shadow: 0 0 12px rgba(99,255,180,0.15); }
   #send-btn:active { transform: scale(.97); }

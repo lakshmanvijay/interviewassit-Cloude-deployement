@@ -6,6 +6,14 @@ const fs = require('fs');
 const http = require('http');
 const https = require('https');
 
+// Mutes Chromium's own internal engine logging (GPU messages, DevTools
+// protocol noise, font-hinting warnings like "TT: undefined function" —
+// none of these are from this app's code, just Chromium/Skia/FreeType
+// chatter). Must be set before app is ready. Only affects Chromium's native
+// --v logging; console.log/console.error calls from this app's own code are
+// untouched and still show up normally.
+app.commandLine.appendSwitch('log-level', '3');
+
 // ── CRASH RESILIENCE ───────────────────────────────
 // There's exactly one main process for the whole app — an uncaught
 // exception ANYWHERE in it (a stray IPC send to a disposed frame, a bad

@@ -27,14 +27,13 @@ function InputArea({ store, inputRef, onSend }) {
   return html`
     <div id="input-area" style=${collapsed ? 'display:none' : ''}>
       <${ScreenshotStrip} store=${store} />
-      <textarea
-        id="prompt-input" ref=${inputRef} rows="2"
-        placeholder="Type a question, or click 📸 to attach a screenshot then send…"
-        onInput=${handleInput}
-        onKeyDown=${handleKeyDown}
-      ></textarea>
-      <div class="input-footer">
-        <span class="input-hint">Ctrl+Enter to send</span>
+      <div class="input-row">
+        <textarea
+          id="prompt-input" ref=${inputRef} rows="2"
+          placeholder="Type a question, or click 📸 to attach a screenshot, then Ctrl+Enter to send…"
+          onInput=${handleInput}
+          onKeyDown=${handleKeyDown}
+        ></textarea>
         <button id="send-btn" disabled=${sendDisabled} onClick=${onSend}>Send ↵</button>
       </div>
     </div>

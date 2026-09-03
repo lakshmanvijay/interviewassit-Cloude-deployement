@@ -323,7 +323,19 @@ function EmptyState({ store, onToggleListen, onStartTrial }) {
           <a onClick=${() => shell.openExternal('https://vijayamai.com/credits')}>Get credits ↗</a>
         </div>
 
-        <button class="cta-btn" onClick=${() => { store.setState({ sessionStartError: null }); setShowSetup(true); }}>
+        <button class="cta-btn" onClick=${() => {
+          store.setState({ sessionStartError: null });
+          setShowSetup(true);
+          // resumeInfo is otherwise only ever fetched once, at login — a
+          // resume uploaded on the web dashboard afterward would keep
+          // showing "Not uploaded" here until a full re-login. Refresh it
+          // every time this screen opens. Only applied on success: a
+          // transient fetch failure shouldn't downgrade an already-known
+          // resume back to "Not uploaded".
+          ipcRenderer.invoke('get-resume-info').then(result => {
+            if (result.ok) store.setState({ resumeInfo: result.resume });
+          });
+        }}>
           <span>🎤</span> Start listening
         </button>
         <div class="welcome-caption">
