@@ -61,6 +61,7 @@ function FeedbackModal({ store, onClose }) {
           <div class="feedback-thanks">🎉 Thanks for the feedback!</div>
         ` : html`
           <div class="feedback-body">
+            <p class="feedback-note">If you find any issues, please let us know. We'll work on fixing them, and your feedback will help us improve the application's performance and overall experience.</p>
             <div class="feedback-stars" role="radiogroup" aria-label="Rating">
               ${[1, 2, 3, 4, 5].map(n => html`
                 <button
