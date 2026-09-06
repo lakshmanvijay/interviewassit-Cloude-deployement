@@ -11,7 +11,15 @@ const PCM_WORKLET_URL = pathToFileURL(path.join(__dirname, 'pcm-worklet-processo
 const VOICE_THRESHOLD  = 15;
 const SILENCE_MS_SHORT = 800;
 const SILENCE_MS_LONG  = 1800;
-const MIN_STT_INTERVAL_MS = 1000;
+// Guards only against a same-tick race re-opening a session, not real VAD
+// chatter — vadLoop's own silence-timer already prevents that (a noise blip
+// cancels via clearTimeout(silenceTimer) before isSpeaking ever flips back
+// to false, so it never reaches beginUtterance() at all). This used to be
+// 1000ms, which was long enough to silently drop an entire follow-up
+// question asked within a second of the previous one ending — beginUtterance
+// would skip opening a session with no fallback, and the whole utterance
+// (however long) transcribed to nothing.
+const MIN_STT_INTERVAL_MS = 300;
 
 const NOISE_PHRASES = [
   'thank you', 'thanks', 'thank you.', 'thanks.', 'thank you!',

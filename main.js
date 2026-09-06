@@ -595,6 +595,18 @@ function createOverlayWindow() {
 
   overlayWindow.on('closed', () => {
     overlayWindow = null;
+    // A 'closed' event with isQuitting still false means the native window
+    // itself was destroyed by something other than an intentional quit —
+    // the close-interception above only catches a normal close *signal*
+    // (Alt+F4 etc.), not the window handle dying outright (e.g. a severe
+    // GPU/graphics-driver crash). Without this, the app would silently
+    // become an invisible zombie: 'window-all-closed' below sees zero
+    // windows and would otherwise quit the whole process — but recreating
+    // synchronously here means that check runs against 1 window again, so
+    // the app recovers with a fresh window instead of the user losing their
+    // whole session (and Task Manager still showing a single dead
+    // background process) to a crash they never asked to quit from.
+    if (!isQuitting) createOverlayWindow();
   });
 
   // Safety net for a renderer crash (e.g. the GPU-pipeline crash a
@@ -946,6 +958,14 @@ app.on('before-quit', () => {
   // this can't reliably block quit to await the request, and why that's an
   // acceptable trade-off given the backend's own WS-disconnect safety net.
   pauseLiveAssistSessionBestEffort('app quit');
+  // Belt-and-suspenders: if a wedged GPU/renderer process or some other hung
+  // native handle stops the normal quit sequence from actually terminating
+  // (the same underlying class of crash that can destroy the window
+  // unexpectedly mid-session — see overlayWindow's 'closed' handler above),
+  // force it after a few seconds rather than leaving an invisible zombie
+  // process running forever. A no-op if quit already finished by then —
+  // there's no process left for this timer to fire meaningfully against.
+  setTimeout(() => app.exit(0), 5000);
 });
 
 // System going to sleep — pause billing for whatever's idle during that
@@ -961,7 +981,13 @@ app.on('will-quit', () => {
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
+  if (process.platform === 'darwin') return;
+  if (isQuitting) { app.quit(); return; }
+  // Belt-and-suspenders alongside overlayWindow's own 'closed' handler
+  // above, in case of a timing edge case where that recreate loses the race
+  // with this event: never let losing a window we didn't intentionally
+  // close take down the whole app.
+  if (!overlayWindow) createOverlayWindow();
 });
 
 // ─────────────────────────────────────────────

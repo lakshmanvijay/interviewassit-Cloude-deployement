@@ -195,11 +195,19 @@ function connectSttSession(language, onPartial) {
         setTimeout(() => {
           if (ws && ws.readyState !== WebSocket.CLOSED) { try { ws.close(); } catch (e) {} }
         }, FINALIZE_TIMEOUT_MS);
-        return { text: bestGuessText || finalText, error: errorMessage };
+      } else if (ws.readyState !== WebSocket.CLOSED) {
+        try { ws.close(); } catch (e) {}
       }
 
-      if (ws.readyState !== WebSocket.CLOSED) { try { ws.close(); } catch (e) {} }
-      return { text: finalText, error: errorMessage };
+      // bestGuessText always includes everything finalText has (plus any
+      // trailing segment Deepgram never promoted to isFinal:true — see the
+      // transcript handler above), so it's used here even when the real
+      // close (`finalized`) landed in time. Without this, a short utterance
+      // that closes cleanly well within FINALIZE_SETTLE_MS but whose last
+      // phrase was still interim when "stop" was sent would silently return
+      // empty text — Deepgram can flush and close without ever finalizing
+      // a trailing phrase that was too short to get a confirmed segment.
+      return { text: bestGuessText || finalText, error: errorMessage };
     },
 
     // Hard-stop with no attempt to finalize — used when the user toggles
