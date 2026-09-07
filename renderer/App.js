@@ -502,8 +502,32 @@ function App({ store }) {
     store.setState({ paymentHistoryOpen: false });
   }
 
+  // Set while the feedback modal is showing specifically because the user
+  // clicked the titlebar's ✕ (close app), not because a session just ended
+  // (quitSession() also opens this modal, but shouldn't quit the app
+  // afterward) — read by closeFeedback() below to know whether dismissing
+  // the modal should actually send 'quit-app' next. A ref, not store state:
+  // purely internal coordination between these two functions, nothing else
+  // needs to react to it.
+  const pendingAppQuitRef = useRef(false);
+
+  // Titlebar's ✕ — shows the feedback prompt first (same one quitSession()
+  // uses) instead of quitting immediately, so there's a chance to rate the
+  // app on the way out rather than only right after a session ends. Skipped
+  // entirely when signed out: submit-feedback needs a session token, and
+  // there's nothing session-related to rate anyway.
+  function quitApp() {
+    if (!store.getState().account) { ipcRenderer.send('quit-app'); return; }
+    pendingAppQuitRef.current = true;
+    store.setState({ feedbackOpen: true });
+  }
+
   function closeFeedback() {
     store.setState({ feedbackOpen: false });
+    if (pendingAppQuitRef.current) {
+      pendingAppQuitRef.current = false;
+      ipcRenderer.send('quit-app');
+    }
   }
 
   function toggleOpacity() {
@@ -644,7 +668,7 @@ function App({ store }) {
         onToggleShortcuts=${toggleShortcuts}
         onToggleOpacity=${toggleOpacity}
         onQuitSession=${quitSession}
-        onQuit=${() => ipcRenderer.send('quit-app')}
+        onQuit=${quitApp}
       />
       <${SettingsPanel} store=${store} onClose=${closeSettings} />
       <${ShortcutsModal} store=${store} onClose=${closeShortcuts} />
