@@ -272,6 +272,13 @@ function EmptyState({ store, onToggleListen, onStartTrial }) {
                 : subscription ? `Unlimited access — ${subscription.label}, no per-session limit.`
                 : 'Starts a new 1-hour session.'}
             </div>
+            <!-- Subscribers otherwise saw no time info at all here (unlike credit
+                 users, who get "Xh Ym left"/"Expires ..." via windowTimer) — the
+                 plan's own expiresAt was fetched (CreditBalanceResponse.subscription)
+                 but never actually rendered anywhere on this page. -->
+            ${subscription && !windowTimer && formatExpiry(subscription.expiresAt) && html`
+              <div class="session-card-sub">Valid until ${formatExpiry(subscription.expiresAt)}</div>
+            `}
             <span class="session-card-credit">✓ ${windowTimer ? 'No credit used' : subscription ? 'No credit used' : 'Uses 1 credit'}</span>
           </button>
         `}
@@ -325,6 +332,24 @@ function EmptyState({ store, onToggleListen, onStartTrial }) {
                  show "Unlimited" instead of a misleading "0 min available". -->
             <div class="pass-timer">${subscription ? 'Unlimited' : formatMinutes(minutesAvailable)} <span>available</span></div>
             <div class="pass-note">✓ No extra credit needed until this window ends.</div>
+          </div>
+        `}
+
+        <!-- Subscriber with no session open yet — windowTimer above only
+             reflects an actual open window (session row or activated credit
+             lot), which a subscriber won't have until they start one, so
+             this used to show nothing at all about their plan on this
+             screen: no card, and the caption further down never mentioned
+             an expiry/renewal date either. Same visual treatment as
+             pass-card so it doesn't read as a lesser/different status. -->
+        ${!windowTimer && subscription && html`
+          <div class="pass-card">
+            <div class="pass-card-row">
+              <span class="pass-dot"></span> SUBSCRIPTION ACTIVE
+            </div>
+            <div class="pass-timer">${subscription.label}</div>
+            ${formatExpiry(subscription.expiresAt) && html`<div class="pass-expiry">Valid until ${formatExpiry(subscription.expiresAt)}</div>`}
+            <div class="pass-note">✓ Unlimited sessions — no credits needed.</div>
           </div>
         `}
 
