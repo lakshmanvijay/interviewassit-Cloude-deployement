@@ -48,12 +48,21 @@ function useTrialCooldown(store) {
 }
 
 // CreditBalanceResponse: { totalMinutesAvailable, lots: [{ id, item,
-// minutesGranted, minutesRemaining, purchasedAt, activatedAt, expiresAt }] }
+// minutesGranted, minutesRemaining, purchasedAt, activatedAt, expiresAt }],
+// subscription: { item, label, startedAt, expiresAt } | null }
 // — the source of truth for balance display (see App.js's
 // 'credit-balance-received' listener and quitSession()), refreshed after
 // every Activate/Pause rather than trusting the AuthResponse's simpler
 // credits/creditsExpireAt snapshot from login time.
+//
+// An active Weekly/Monthly unlimited plan (subscription) means never "out of
+// credits" regardless of totalMinutesAvailable — a subscriber holds zero
+// credit lots (unlimited access doesn't spend any), so without this check
+// they'd read as having 0 credits and get stuck on the "buy more" dead end
+// below even though the backend would happily start their session for free
+// (see backend's InterviewSessionService.activateLiveAssist).
 function hasNoCredits(creditBalance) {
+  if (creditBalance && creditBalance.subscription) return false;
   return !creditBalance || !(creditBalance.totalMinutesAvailable > 0);
 }
 
@@ -130,6 +139,7 @@ function EmptyState({ store, onToggleListen, onStartTrial }) {
   const trial = useTrialCooldown(store);
   const noCredits = hasNoCredits(creditBalance);
   const minutesAvailable = creditBalance ? creditBalance.totalMinutesAvailable : 0;
+  const subscription = creditBalance && creditBalance.subscription;
 
   // Transient UI navigation, not app state — doesn't need to survive a
   // remount or be visible to other components, so plain local state rather
@@ -258,9 +268,11 @@ function EmptyState({ store, onToggleListen, onStartTrial }) {
               ${windowTimer && html`<span class="session-card-badge">ACTIVE</span>`}
             </div>
             <div class="session-card-sub">
-              ${windowTimer ? `Continuing reuses your active window — ${windowTimer.fullLabel} left.` : 'Starts a new 1-hour session.'}
+              ${windowTimer ? `Continuing reuses your active window — ${windowTimer.fullLabel} left.`
+                : subscription ? `Unlimited access — ${subscription.label}, no per-session limit.`
+                : 'Starts a new 1-hour session.'}
             </div>
-            <span class="session-card-credit">✓ ${windowTimer ? 'No credit used' : 'Uses 1 credit'}</span>
+            <span class="session-card-credit">✓ ${windowTimer ? 'No credit used' : subscription ? 'No credit used' : 'Uses 1 credit'}</span>
           </button>
         `}
 
@@ -307,8 +319,11 @@ function EmptyState({ store, onToggleListen, onStartTrial }) {
                  rather than the small credits-row text — the window
                  countdown alone doesn't tell you how much of your credit is
                  actually left to spend within it, and that's the number a
-                 user glancing at this card actually wants to know at a glance. -->
-            <div class="pass-timer">${formatMinutes(minutesAvailable)} <span>available</span></div>
+                 user glancing at this card actually wants to know at a glance.
+                 A subscriber holds zero credit lots (unlimited access spends
+                 none), so minutesAvailable reads 0 for them even mid-session —
+                 show "Unlimited" instead of a misleading "0 min available". -->
+            <div class="pass-timer">${subscription ? 'Unlimited' : formatMinutes(minutesAvailable)} <span>available</span></div>
             <div class="pass-note">✓ No extra credit needed until this window ends.</div>
           </div>
         `}
@@ -339,7 +354,10 @@ function EmptyState({ store, onToggleListen, onStartTrial }) {
           <span>🎤</span> Start listening
         </button>
         <div class="welcome-caption">
-          ${windowTimer ? 'Continue your active session.' : noCredits ? 'No credits available — get more to continue.' : 'Spends 1 credit — buys a 1-hour window.'}
+          ${windowTimer ? 'Continue your active session.'
+            : subscription ? `Unlimited access — ${subscription.label}, no per-session limit.`
+            : noCredits ? 'No credits available — get more to continue.'
+            : 'Spends 1 credit — buys a 1-hour window.'}
         </div>
       ` : html`
         <!-- ── SESSION ACTIVE — capture already starts automatically

@@ -22,7 +22,7 @@ function SettingsPanel({ store, onClose }) {
           <div class="settings-avatar">${account.name.charAt(0).toUpperCase()}</div>
           <div class="account-name">${account.name}</div>
           <div class="account-email">${account.email}</div>
-          <span class="account-plan">${creditBalance ? `${creditBalance.totalMinutesAvailable} min` : (account.plan || 'Free')}</span>
+          <span class="account-plan">${creditBalance && creditBalance.subscription ? creditBalance.subscription.label : creditBalance ? `${creditBalance.totalMinutesAvailable} min` : (account.plan || 'Free')}</span>
           <button class="settings-ok-btn logout-btn" onClick=${() => ipcRenderer.send('logout')}>Logout</button>
         ` : html`
           <div class="account-name">Not signed in</div>

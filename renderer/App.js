@@ -432,12 +432,19 @@ function App({ store }) {
   // via recordQuestion's auto-start path without this client having
   // received a fresh assistExpiresAt for it). Trial sessions are exempt —
   // a trial legitimately runs on 0 paid credits by definition and is
-  // already gated by its own trialExpiresAt timer instead.
+  // already gated by its own trialExpiresAt timer instead. An active
+  // Weekly/Monthly unlimited plan (creditBalance.subscription) is exempt for
+  // the same reason: a subscriber holds zero credit LOTS on purpose (see
+  // backend's InterviewSessionService.activateLiveAssist), so
+  // totalMinutesAvailable reads 0 for them even mid-session — without this
+  // check, this effect fired quitSession() the instant the very first
+  // post-start balance refresh landed, always right after their session began.
   const creditBalance = useStoreSlice(store, s => s.creditBalance);
   const sessionStarted = useStoreSlice(store, s => s.sessionStarted);
   useEffect(() => {
     if (!sessionStarted || !creditBalance) return;
     if (store.getState().trialExpiresAt) return; // trial — gated by its own timer instead
+    if (creditBalance.subscription) return; // unlimited plan — no minute budget to run out of
     if (creditBalance.totalMinutesAvailable <= 0) quitSession();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [creditBalance, sessionStarted]);
