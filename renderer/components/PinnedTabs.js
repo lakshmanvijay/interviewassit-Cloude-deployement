@@ -1,5 +1,6 @@
 const { html } = require('../html');
 const { useStoreSlice } = require('../hooks');
+const { forgetPinnedScroll } = require('./PinnedQuestion');
 
 // Row of tabs, one per pinned question, rendered directly under VoiceBar
 // (the "speaking line") — see App.js. Replaces the old single-pin toggle:
@@ -41,6 +42,7 @@ function PinnedTabs({ store }) {
       pinnedIds: ids.filter(x => x !== id),
       openPinnedIds: open.filter(x => x !== id),
     });
+    forgetPinnedScroll(id);
   }
 
   return html`
