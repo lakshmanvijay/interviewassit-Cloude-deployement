@@ -1,6 +1,7 @@
 const { html } = require('../html');
 const { useEffect, useRef } = require('preact/hooks');
 const { useStoreSlice } = require('../hooks');
+const { pinCurrentQuestion } = require('../lib/pinnedQuestions');
 
 function VoiceBar({ store, voiceController }) {
   const voiceStatus    = useStoreSlice(store, s => s.voiceStatus);
@@ -36,22 +37,6 @@ function VoiceBar({ store, voiceController }) {
 
   if (!sessionStarted) return null;
 
-  // Pins whichever question is most recent right now, adding it as a new tab
-  // (see PinnedTabs.js/PinnedQuestion.js) — any number can be pinned at
-  // once, unlike the old single-pin behavior. If that question is already
-  // pinned, this just re-opens its panel instead of pinning a duplicate.
-  // Unpinning a tab entirely is done from the tab itself (its own ✕), not
-  // from this button.
-  function pinCurrent() {
-    if (!currentQuestionId) return;
-    const { pinnedIds: ids, openPinnedIds: open } = store.getState();
-    if (ids.includes(currentQuestionId)) {
-      if (!open.includes(currentQuestionId)) store.setState({ openPinnedIds: [...open, currentQuestionId] });
-      return;
-    }
-    store.setState({ pinnedIds: [...ids, currentQuestionId], openPinnedIds: [...open, currentQuestionId] });
-  }
-
   const currentIsPinned = !!currentQuestionId && pinnedIds.includes(currentQuestionId);
 
   return html`
@@ -74,7 +59,7 @@ function VoiceBar({ store, voiceController }) {
         type="button"
         class="pin-toggle-btn ${currentIsPinned ? 'active' : ''}"
         title=${currentIsPinned ? 'Current question already pinned' : 'Pin current question as a tab'}
-        onClick=${pinCurrent}
+        onClick=${() => pinCurrentQuestion(store)}
       >📌</button>
     </div>
   `;

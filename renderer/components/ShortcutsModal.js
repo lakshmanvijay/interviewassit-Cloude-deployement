@@ -8,6 +8,8 @@ const { useStoreSlice } = require('../hooks');
 const SHORTCUTS = [
   ['Ctrl+Shift+L', '🎤 Toggle listening'],
   ['Ctrl+Shift+S', '📸 Screenshot'],
+  ['Ctrl+Shift+P', '📌 Pin current question'],
+  ['Ctrl+Shift+O', '📌 Open/minimize pinned tab'],
   ['Ctrl+Shift+C', '⟳ Clear conversation'],
   ['Ctrl+Shift+M', '− Collapse / expand'],
   ['Ctrl+Shift+H', 'Hide / Show window'],

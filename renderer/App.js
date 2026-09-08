@@ -10,6 +10,7 @@ const { screenAnalyze } = require('./lib/screenAnalyze');
 const { createVoiceController } = require('./lib/voice');
 const { createWarningController } = require('./lib/warning');
 const { createQuestionNav } = require('./lib/navigation');
+const { pinCurrentQuestion, toggleCurrentPinnedPanel } = require('./lib/pinnedQuestions');
 const { scrollElIntoTop } = require('./lib/scroll');
 
 const { TitleBar } = require('./components/TitleBar');
@@ -569,6 +570,10 @@ function App({ store }) {
       'nav-next-question':      () => questionNavRef.current.navigateQuestion(+1),
       'jump-to-first-question': () => questionNavRef.current.jumpToQuestion(0),
       'jump-to-last-question':  () => questionNavRef.current.jumpToQuestion(Infinity),
+      // Shortcut equivalents of VoiceBar.js's 📌 button and clicking a tab in
+      // PinnedTabs.js — see lib/pinnedQuestions.js for the shared logic.
+      'pin-current-question':        () => pinCurrentQuestion(store),
+      'toggle-current-pinned-panel': () => toggleCurrentPinnedPanel(store),
       // Also re-hydrates trialUsedAt from THIS account's own scoped
       // localStorage key (see store.js's trialUsedAtKey) rather than
       // whatever the store already had — otherwise, on a shared machine,

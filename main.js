@@ -885,6 +885,22 @@ app.whenReady().then(() => {
     }
   });
 
+  // Ctrl+Shift+P — pin the current question (same as VoiceBar's 📌 button)
+  globalShortcut.register('CommandOrControl+Shift+P', () => {
+    if (overlayWindow) {
+      if (!isOverlayVisible) toggleOverlay();
+      sendToOverlay('pin-current-question');
+    }
+  });
+
+  // Ctrl+Shift+O — open/minimize the current question's tab in the pin bar
+  globalShortcut.register('CommandOrControl+Shift+O', () => {
+    if (overlayWindow) {
+      if (!isOverlayVisible) toggleOverlay();
+      sendToOverlay('toggle-current-pinned-panel');
+    }
+  });
+
   // Ctrl+Shift+M — collapse / expand
   globalShortcut.register('CommandOrControl+Shift+M', () => {
     if (overlayWindow) {
