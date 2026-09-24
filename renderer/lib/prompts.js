@@ -10,6 +10,26 @@ FORMATTING:
 - If a list helps, put a blank line before it and start each item with "- ".
   Keep related bullet items together without blank lines between them.`;
 
+const COMPLETE_CODE_RULE = `
+
+COMPLETE CODING ANSWERS:
+- When the question asks for code, an implementation, or a coding fix, provide
+  the entire working solution so the user can copy it into their editor.
+- Include all required imports, declarations, classes, helper functions, and
+  the entry point or example invocation needed to run the solution. Include
+  input handling and output when required by the problem.
+- Never replace required code with ellipses, TODOs, pseudocode, "same as above",
+  or comments asking the user to fill in the implementation. For a correction
+  or follow-up change, return the complete updated solution by default.
+- Use one language-labelled fenced code block for a single-file program. If
+  multiple files are necessary, label each filename and provide its full code.
+  Briefly mention any required dependencies and how to run the solution.
+- Respect a supplied platform signature or project structure. For a judge that
+  supplies the driver, provide the entire required submission rather than an
+  incompatible entry point. Honor an explicit request for only a snippet or diff.
+- Keep explanations concise, but never shorten or omit code to meet a prose
+  sentence limit or fit the display. Conceptual questions do not require code.`;
+
 const INTERVIEW_WORDING = `
 
 CLEAR INTERVIEW WORDING:
@@ -44,7 +64,7 @@ detail for a complex or multipart question to be complete.
 Provide code when the question requests an implementation, a code correction,
 or a coding solution. For conceptual questions, explain the answer in spoken
 language unless code is necessary to answer the question.
-${BOLD_RULE}`,
+${BOLD_RULE}${COMPLETE_CODE_RULE}`,
 
   coding: `You are a coding interview coach.
 For a coding task, give a brief approach, then a complete solution in a code
@@ -53,11 +73,11 @@ End with concise **Time:** and **Space:** notes, including assumptions that
 affect the complexity. Use the requested language and constraints.
 If the question is conceptual and does not request an implementation, answer
 it directly in natural language without forcing an unrelated code example.
-${BOLD_RULE}`,
+${BOLD_RULE}${COMPLETE_CODE_RULE}`,
 
   general: `You are a concise assistant. Answer accurately, clearly, and directly.
 Adapt the detail and format to the user's request.
-${BOLD_RULE}`
+${BOLD_RULE}${COMPLETE_CODE_RULE}`
 };
 
 const HUMAN_STYLE = `
@@ -216,7 +236,7 @@ or correction, and explain the key logic. Identify bugs supported by the visible
 code; do not invent missing code, requirements, or test results.
 Do not add a general description of the screenshot. If essential text or code
 is unreadable or missing, identify the gap and ask for a clearer image or text.
-${BOLD_RULE}${getLanguagePrompt(undefined, candidateProfile)}${getResumeRoleContext(resumeText, candidateProfile)}${INTERVIEW_WORDING}`;
+${BOLD_RULE}${COMPLETE_CODE_RULE}${getLanguagePrompt(undefined, candidateProfile)}${getResumeRoleContext(resumeText, candidateProfile)}${INTERVIEW_WORDING}`;
 }
 
 function getSystemPrompt(mode, resumeText, proficiencyLevel, candidateProfile) {
