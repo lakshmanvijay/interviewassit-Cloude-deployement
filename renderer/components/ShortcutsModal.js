@@ -6,7 +6,7 @@ const { useStoreSlice } = require('../hooks');
 // pre-session screen focused on account/session status instead of a long
 // static list.
 const SHORTCUTS = [
-  ['Ctrl+Shift+L', '🎤 Toggle listening'],
+  ['Ctrl+Shift+L', '🎤 Start or stop listening'],
   ['Ctrl+Shift+S', '📸 Screenshot'],
   ['Ctrl+Shift+P', '📌 Pin current question'],
   ['Ctrl+Shift+O', '📌 Open/minimize pinned tab'],

@@ -18,10 +18,6 @@ function InputArea({ store, inputRef, onSend }) {
     el.style.height = Math.min(el.scrollHeight, 120) + 'px';
   }
 
-  function handleKeyDown(e) {
-    if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); onSend(); }
-  }
-
   if (!sessionStarted) return null;
 
   return html`
@@ -32,7 +28,6 @@ function InputArea({ store, inputRef, onSend }) {
           id="prompt-input" ref=${inputRef} rows="2"
           placeholder="Type a question, or click 📸 to attach a screenshot, then Ctrl+Enter to send…"
           onInput=${handleInput}
-          onKeyDown=${handleKeyDown}
         ></textarea>
         <button id="send-btn" disabled=${sendDisabled} onClick=${onSend}>Send ↵</button>
       </div>

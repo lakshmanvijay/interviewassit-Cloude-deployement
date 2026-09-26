@@ -263,9 +263,11 @@ function App({ store }) {
   }
 
   function sendMessage() {
+    const { sessionStarted, sendDisabled, pendingScreenshots: shots } = store.getState();
+    if (!sessionStarted || sendDisabled) return;
     const input = inputRef.current;
+    if (!input) return;
     const text = input.value.trim();
-    const shots = store.getState().pendingScreenshots;
 
     if (shots.length > 0) {
       const images = [...shots];
@@ -560,6 +562,14 @@ function App({ store }) {
     };
     document.addEventListener('mousedown', onDocMouseDown);
 
+    // Allow screenshot-only sends even when focus is outside the textarea.
+    const onDocKeyDown = e => {
+      if (e.key !== 'Enter' || !e.ctrlKey || e.isComposing) return;
+      e.preventDefault();
+      if (!e.repeat) sendMessage();
+    };
+    document.addEventListener('keydown', onDocKeyDown);
+
     const listeners = {
       'focus-input':            () => inputRef.current && inputRef.current.focus(),
       'clear-conversation':     () => clearConversation(),
@@ -656,6 +666,7 @@ function App({ store }) {
       Object.entries(listeners).forEach(([ch, fn]) => ipcRenderer.removeListener(ch, fn));
       ipcRenderer.removeListener('opacity-step', onOpacityStep);
       document.removeEventListener('mousedown', onDocMouseDown);
+      document.removeEventListener('keydown', onDocKeyDown);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

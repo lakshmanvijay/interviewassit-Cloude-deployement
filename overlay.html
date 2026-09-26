@@ -645,6 +645,12 @@
   }
   .message.nav-focus { animation: navFlash 1.1s ease-out forwards; }
   .message-role { font-size: 9px; text-transform: uppercase; letter-spacing: .1em; font-weight: 600; }
+  .question-text { display: flex; align-items: flex-start; gap: 8px; }
+  .question-body { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .question-pin { flex-shrink: 0; white-space: nowrap; }
+  .question-pin { border: 1px solid var(--border); border-radius: 5px; background: transparent; color: var(--text-dim); padding: 3px 7px; font-size: 10px; cursor: pointer; }
+  .question-pin:hover, .question-pin.pinned { color: var(--accent2); border-color: var(--accent2); }
+  .question-pin:focus-visible { outline: 2px solid var(--accent2); outline-offset: 2px; }
   .message.user      .message-role { color: var(--accent2); }
   .message.assistant .message-role { color: var(--accent); }
   .question-number {

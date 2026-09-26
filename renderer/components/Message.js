@@ -2,6 +2,7 @@ const { html } = require('../html');
 const { memo } = require('preact/compat');
 const { useStoreSlice } = require('../hooks');
 const { renderMarkdown } = require('../lib/markdown');
+const { pinQuestion } = require('../lib/pinnedQuestions');
 
 // Subscribes only to its own message by id, so a streaming answer's content
 // updates re-render this one leaf — not the conversation list, not the rest
@@ -9,6 +10,7 @@ const { renderMarkdown } = require('../lib/markdown');
 // message appended) doesn't re-invoke unrelated Message instances either.
 function MessageImpl({ store, id }) {
   const message = useStoreSlice(store, s => s.conversation.find(m => m.id === id));
+  const pinned = useStoreSlice(store, s => s.pinnedIds.includes(id));
   // Separate slice, compared by value (a plain number) rather than object
   // reference — so this doesn't re-render on unrelated store changes the
   // way returning a new object every time would. Only user messages are
@@ -34,7 +36,16 @@ function MessageImpl({ store, id }) {
       ${showMarkdown
         ? html`<div class="message-content" dangerouslySetInnerHTML=${{ __html: renderMarkdown(content) }}></div>`
         : role === 'user'
-          ? html`<div class="message-content question-text"><span class="question-number">Q${questionNumber}:</span> ${content}</div>`
+          ? html`<div class="message-content question-text">
+              <span class="question-body"><span class="question-number">Q${questionNumber}:</span> ${content}</span>
+              <button
+                type="button"
+                class="question-pin ${pinned ? 'pinned' : ''}"
+                title=${pinned ? 'Open pinned question' : 'Pin this question'}
+                aria-label=${`${pinned ? 'Open pinned question' : 'Pin question'} ${questionNumber}`}
+                onClick=${() => pinQuestion(store, id)}
+              >📌 ${pinned ? 'Pinned' : 'Pin'}</button>
+            </div>`
           : html`<div class="message-content ${isAssistant && streaming ? 'streaming' : ''}">${content}</div>`}
     </div>
   `;

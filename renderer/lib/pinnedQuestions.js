@@ -12,8 +12,12 @@ function getCurrentQuestionId(store) {
 // makes sure its panel is open either way. Mirrors VoiceBar.js's pin button:
 // never closes an already-open panel, only pins/opens.
 function pinCurrentQuestion(store) {
-  const id = getCurrentQuestionId(store);
-  if (!id) return;
+  pinQuestion(store, getCurrentQuestionId(store));
+}
+
+// Pin a specific question, including an earlier one in the conversation.
+function pinQuestion(store, id) {
+  if (!store.getState().conversation.some(m => m.id === id && m.role === 'user')) return;
   const { pinnedIds: ids, openPinnedIds: open } = store.getState();
   if (ids.includes(id)) {
     if (!open.includes(id)) store.setState({ openPinnedIds: [...open, id] });
@@ -35,4 +39,4 @@ function toggleCurrentPinnedPanel(store) {
   });
 }
 
-module.exports = { getCurrentQuestionId, pinCurrentQuestion, toggleCurrentPinnedPanel };
+module.exports = { getCurrentQuestionId, pinQuestion, pinCurrentQuestion, toggleCurrentPinnedPanel };

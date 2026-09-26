@@ -37,7 +37,8 @@ function TitleBar({ store, onToggleListen, onCaptureScreenshot, onClear, onMinim
             class="icon-btn ${listening ? 'listening' : ''}"
             id="mic-btn"
             onClick=${onToggleListen}
-            title="🎤 Listen  [Ctrl+Shift+L]"
+            title=${`${listening ? 'Stop listening' : 'Start listening'}  [Ctrl+Shift+L]`}
+            aria-label=${listening ? 'Stop listening' : 'Start listening'}
           >🎤</button>
           <button
             class="icon-btn"
