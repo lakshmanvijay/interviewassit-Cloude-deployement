@@ -13,7 +13,7 @@ function shallowArrayEqual(a, b) {
 // Only re-renders when a message is *added or removed* (ids list changes);
 // per-token streaming updates are handled entirely inside each Message.
 function Conversation({ store, containerRef, onToggleListen, onStartTrial }) {
-  const ids       = useStoreSlice(store, s => s.conversation.map(m => m.id), shallowArrayEqual);
+  const ids       = useStoreSlice(store, s => s.conversation.filter(m => !m.hidden).map(m => m.id), shallowArrayEqual);
   const collapsed = useStoreSlice(store, s => s.collapsed);
 
   return html`

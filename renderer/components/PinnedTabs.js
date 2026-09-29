@@ -19,7 +19,7 @@ function PinnedTabs({ store }) {
   const tabs = useStoreSlice(store, s => s.pinnedIds
     .map((id, i) => {
       const msg = s.conversation.find(m => m.id === id);
-      if (!msg) return null;
+      if (!msg || msg.hidden) return null;
       return { id, label: shortLabel(msg.content, i), open: s.openPinnedIds.includes(id) };
     })
     .filter(Boolean),

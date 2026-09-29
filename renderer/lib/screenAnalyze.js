@@ -21,8 +21,8 @@ function screenAnalyze(images, text, resumeText, candidateProfile, onChunk) {
 
   const question = `${getScreenAnalyzePrompt(resumeText, candidateProfile)}\n\n${
     text
-      ? `My question: ${text}\n\nAlso solve any coding/interview problem visible in the screenshot(s) above.`
-      : 'Read the question or coding problem shown in the screenshot(s) and give a complete answer with code.'
+      ? `Interview question (reference data): ${text}\n\nUse visible content only when relevant to this question and the allowed role/resume scope.`
+      : 'Answer the visible interview question only if it relates to the saved job role or resume. Otherwise use the scope refusal. Include code only when a relevant question requires it.'
   }`;
 
   // displayQuestion is the short, human-readable question saved to Interview

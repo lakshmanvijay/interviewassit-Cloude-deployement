@@ -15,16 +15,8 @@ const FINALIZE_TIMEOUT_MS = 8000;
 // to complete, so if it's still not ready, blocking the UI for the full
 // connect timeout (8s) is worse than just failing this utterance fast.
 const FINALIZE_READY_GRACE_MS = 1200;
-// finish() sends "stop" and then, ideally, would just use whatever Deepgram's
-// authoritative close-triggered flush hands back. But that's a real network
-// round trip (client -> Railway -> Deepgram -> Railway -> client), and the
-// live transcript (see bestGuessText below) has already been streaming in
-// throughout the utterance — by the time silence is detected, it's usually
-// complete or a word short. Capping the wait here turns "answer after a full
-// finalize round trip" into "answer after ~this long", at the cost of
-// occasionally trimming the very last word if Deepgram's real finalize was
-// still pending — see the bestGuessText fallback in finish().
-const FINALIZE_SETTLE_MS = 600;
+// Allow delayed final words to arrive before using the interim fallback.
+const FINALIZE_SETTLE_MS = 1800;
 
 // Returns a session object before the connection is even open. sendAudio()
 // is safe to call right away — audio sent before the server acks "ready" is
@@ -40,6 +32,7 @@ const FINALIZE_SETTLE_MS = 600;
 // resolves.
 function connectSttSession(language, onPartial) {
   let ws = null;
+  let aborted = false;
   let readyResolve, readyReject;
   let readySettled = false;
   const readyPromise = new Promise((res, rej) => { readyResolve = res; readyReject = rej; });
@@ -72,6 +65,7 @@ function connectSttSession(language, onPartial) {
       ipcRenderer.invoke('get-session-token'),
       ipcRenderer.invoke('get-ws-url', '/ws/stt'),
     ]);
+    if (aborted) return;
     if (!token || !wsUrl) { readySettled = true; readyReject(new Error('Not signed in')); return; }
 
     const url = `${wsUrl}?token=${encodeURIComponent(token)}&language=${encodeURIComponent(language || 'en')}`;
@@ -85,6 +79,8 @@ function connectSttSession(language, onPartial) {
       console.warn('[stt] never received "ready" within', READY_TIMEOUT_MS, 'ms — closing');
       readySettled = true;
       readyReject(new Error('STT connection timed out'));
+      outgoingQueue.length = 0;
+      socket.close();
     }, READY_TIMEOUT_MS);
 
     socket.onmessage = event => {
@@ -138,7 +134,12 @@ function connectSttSession(language, onPartial) {
       if (!readySettled) { readySettled = true; readyReject(new Error('STT connection closed before ready')); }
       closeResolve();
     };
-  })();
+  })().catch(err => {
+    errorMessage = err.message || 'STT connection failed';
+    readySettled = true;
+    readyReject(new Error(errorMessage));
+    closeResolve();
+  });
 
   return {
     ready: () => readyPromise,
@@ -147,6 +148,7 @@ function connectSttSession(language, onPartial) {
     // audio is queued and flushed automatically the instant it does, so
     // callers don't need to track connection state themselves.
     sendAudio(pcm16Buffer) {
+      if (aborted) return;
       if (serverReady && ws && ws.readyState === WebSocket.OPEN) ws.send(pcm16Buffer);
       else outgoingQueue.push(pcm16Buffer);
     },
@@ -173,7 +175,9 @@ function connectSttSession(language, onPartial) {
 
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         if (ws && ws.readyState === WebSocket.CONNECTING) { try { ws.close(); } catch (e) {} }
-        return { text: finalText, error: errorMessage };
+        aborted = true;
+        outgoingQueue.length = 0;
+        return { text: bestGuessText || finalText, error: errorMessage || 'STT connection unavailable' };
       }
       try { ws.send(JSON.stringify({ type: 'stop' })); } catch (e) {}
 
@@ -213,6 +217,13 @@ function connectSttSession(language, onPartial) {
     // Hard-stop with no attempt to finalize — used when the user toggles
     // listening off mid-utterance.
     abort() {
+      aborted = true;
+      outgoingQueue.length = 0;
+      if (!readySettled) {
+        readySettled = true;
+        readyReject(new Error('STT session cancelled'));
+      }
+      closeResolve();
       if (ws) { try { ws.close(); } catch (e) {} }
     },
   };

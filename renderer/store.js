@@ -26,7 +26,6 @@ function createStore(initialState) {
 }
 
 const store = createStore({
-  mode: 'interview',
   model: 'gpt-oss-120b',
   proficiencyLevel: 'intermediate',  // 'basic' | 'intermediate' | 'advanced' — shapes answer language, see lib/prompts.js
   conversation: [],        // [{ id, role, content, streaming }]

@@ -4,7 +4,9 @@ const { useRef, useEffect } = require('preact/hooks');
 
 const { trialUsedAtKey } = require('./store');
 const { useStoreSlice } = require('./hooks');
-const { getSystemPrompt } = require('./lib/prompts');
+const { getSystemPrompt, getContextIssue } = require('./lib/prompts');
+const { finishAnswerTurn } = require('./lib/answerVisibility');
+const { getQuestionHistory } = require('./lib/questionHistory');
 const { connect: connectInterviewSocket, disconnect: disconnectInterviewSocket, askBackend, cancelQuestion, CANCELLED_ERROR } = require('./lib/interviewSocket');
 const { screenAnalyze } = require('./lib/screenAnalyze');
 const { createVoiceController } = require('./lib/voice');
@@ -74,6 +76,12 @@ function App({ store }) {
   async function ask(text, liveUserId, isContinuation) {
     text = (text || '').trim();
     if (!text) return;
+    const { resumeText, proficiencyLevel, interviewSettings } = store.getState();
+    const contextIssue = getContextIssue(resumeText, interviewSettings);
+    if (contextIssue) {
+      warningRef.current.showOnScreen(contextIssue);
+      return;
+    }
 
     // Captured *before* the new/finalized user message is appended below, so
     // it holds prior turns only — the backend's WS API takes one flat
@@ -82,22 +90,19 @@ function App({ store }) {
     // about to ask. Excludes the live bubble itself, since — if it exists —
     // it's already sitting in `conversation` as this exact question, not a
     // prior turn.
-    const priorHistory = store.getState().conversation
-      .filter(m => m.id !== liveUserId)
-      .slice(-2)
-      .map(m => ({ role: m.role, content: m.content }));
+    const conversation = store.getState().conversation;
+    const priorHistory = getQuestionHistory(conversation, liveUserId);
 
     const reuseLive = liveUserId && store.getState().conversation.some(m => m.id === liveUserId);
     const userId = reuseLive ? liveUserId : genId();
     if (reuseLive) {
-      updateMessage(userId, { content: text });
+      updateMessage(userId, { content: text, hidden: true });
     } else {
-      store.setState(s => ({ conversation: [...s.conversation, { id: userId, role: 'user', content: text }] }));
+      store.setState(s => ({ conversation: [...s.conversation, { id: userId, role: 'user', content: text, hidden: true }] }));
     }
     scrollQuestionIntoTop(userId);
 
-    const { mode, resumeText, proficiencyLevel, interviewSettings } = store.getState();
-    const systemPrompt = getSystemPrompt(mode, resumeText, proficiencyLevel, interviewSettings);
+    const systemPrompt = getSystemPrompt(resumeText, proficiencyLevel, interviewSettings);
     // Capped per turn — priorHistory was folded in at full length, so one
     // long previous answer (multi-paragraph, with a code block) could add
     // several hundred extra tokens to EVERY question's prompt from then on,
@@ -105,7 +110,7 @@ function App({ store }) {
     // of the prior turn to keep continuity, not a verbatim replay. Bigger
     // prompt = more for the provider to prefill before it can start
     // generating, which shows up directly as slower time-to-first-token.
-    const HISTORY_TURN_MAX_CHARS = 400;
+    const HISTORY_TURN_MAX_CHARS = 1600;
     const historyText = priorHistory.length
       ? '\n\nRECENT CONVERSATION:\n' + priorHistory.map(m => {
           const content = m.content.length > HISTORY_TURN_MAX_CHARS
@@ -123,13 +128,16 @@ function App({ store }) {
     let assistantId;
     if (isContinuation && existing) {
       assistantId = existing.assistantId;
-      updateMessage(assistantId, { content: '', streaming: true });
+      updateMessage(assistantId, { content: '', streaming: true, hidden: true });
     } else {
       assistantId = genId();
-      store.setState(s => ({ conversation: [...s.conversation, { id: assistantId, role: 'assistant', content: '', streaming: true }] }));
+      store.setState(s => ({ conversation: [...s.conversation, { id: assistantId, role: 'assistant', content: '', streaming: true, hidden: true }] }));
     }
 
     let lastRenderAt = 0;
+    const requestState = { assistantId, askId: null };
+    askStateRef.current[userId] = requestState;
+    const isCurrent = () => askStateRef.current[userId] === requestState;
     // Latency instrumentation — brackets the leg voice.js's own STT-finalize
     // timing log can't see: from the moment we actually send the question
     // over the wire to the first answer token rendered. Combined with the
@@ -146,6 +154,7 @@ function App({ store }) {
       // provider configured" incident). Remove this pin once the backend
       // default is confirmed fixed, if you'd rather not hardcode it here.
       const { id: askId, promise } = await askBackend(question, partial => {
+        if (!isCurrent()) return;
         if (!firstTokenLogged) {
           firstTokenLogged = true;
           console.log(`[ask] first token in ${Math.round(performance.now() - askSentAt)}ms`);
@@ -163,19 +172,23 @@ function App({ store }) {
       }, 'cerebras', undefined, text);
       // Recorded so a later continuation can find this bubble/request again,
       // and so cancelInFlight() can abort this exact request by id.
-      askStateRef.current[userId] = { assistantId, askId };
+      requestState.askId = askId;
+      if (!isCurrent()) cancelQuestion(askId);
 
       const reply = await promise;
-      updateMessage(assistantId, { content: reply, streaming: false });
+      if (!isCurrent()) return;
+      if (!finishAnswerTurn(store, userId, assistantId, reply)) delete askStateRef.current[userId];
       warningRef.current.showWarning('');
     } catch (err) {
+      if (!isCurrent()) return;
       if (err.message === CANCELLED_ERROR) {
         // Superseded by a continuation — cancelInFlight() already reset this
         // bubble, and the continuation's own ask() call (already in flight
         // or about to be) will fill it in with the regenerated answer. No
         // error to show; this was deliberate, not a failure.
       } else {
-        updateMessage(assistantId, { content: 'Error: ' + err.message, streaming: false });
+        finishAnswerTurn(store, userId, assistantId, '');
+        delete askStateRef.current[userId];
         warningRef.current.showWarning(err.message);
       }
     } finally {
@@ -193,7 +206,9 @@ function App({ store }) {
     const state = askStateRef.current[questionId];
     if (!state) return;
     cancelQuestion(state.askId);
-    updateMessage(state.assistantId, { content: '', streaming: true });
+    askStateRef.current[questionId] = { assistantId: state.assistantId, askId: null };
+    updateMessage(questionId, { hidden: true });
+    updateMessage(state.assistantId, { content: '', streaming: true, hidden: true });
   }
 
   const voiceControllerRef = useRef(null);
@@ -223,6 +238,7 @@ function App({ store }) {
           if (state) updateMessage(state.assistantId, { content: '_Auto-ask was turned off mid-answer — press Send to get an answer._', streaming: false });
         }
         const el = inputRef.current;
+        if (!el) return;
         el.value = (el.value ? el.value + ' ' : '') + text;
         el.style.height = 'auto';
         el.style.height = Math.min(el.scrollHeight, 120) + 'px';
@@ -231,16 +247,22 @@ function App({ store }) {
   }
 
   async function askWithScreenshots(images, text) {
+    const context = store.getState();
+    const contextIssue = getContextIssue(context.resumeText, context.interviewSettings);
+    if (contextIssue) {
+      warningRef.current.showOnScreen(contextIssue);
+      return;
+    }
     const userLabel = images.length > 1
       ? `📸 ×${images.length}${text ? ' — ' + text : ''}`
       : `📸${text ? ' — ' + text : ''}`;
 
     const userId = genId();
-    store.setState(s => ({ conversation: [...s.conversation, { id: userId, role: 'user', content: userLabel }] }));
+    store.setState(s => ({ conversation: [...s.conversation, { id: userId, role: 'user', content: userLabel, hidden: true }] }));
     scrollQuestionIntoTop(userId);
 
     const assistantId = genId();
-    store.setState(s => ({ conversation: [...s.conversation, { id: assistantId, role: 'assistant', content: '', streaming: true }] }));
+    store.setState(s => ({ conversation: [...s.conversation, { id: assistantId, role: 'assistant', content: '', streaming: true, hidden: true }] }));
 
     store.setState({ sendDisabled: true });
     let lastRenderAt = 0;
@@ -253,9 +275,10 @@ function App({ store }) {
         updateMessage(assistantId, { content: partial });
         scrollQuestionIntoTop(userId);
       });
-      updateMessage(assistantId, { content: reply, streaming: false });
+      finishAnswerTurn(store, userId, assistantId, reply);
     } catch (err) {
-      updateMessage(assistantId, { content: 'Error: ' + err.message, streaming: false });
+      finishAnswerTurn(store, userId, assistantId, '');
+      warningRef.current.showWarning(err.message);
     } finally {
       store.setState({ sendDisabled: false });
       scrollQuestionIntoTop(userId);
@@ -284,6 +307,8 @@ function App({ store }) {
   }
 
   function clearConversation() {
+    for (const state of Object.values(askStateRef.current)) cancelQuestion(state.askId);
+    askStateRef.current = {};
     store.setState({ conversation: [], navIndex: -1, pinnedIds: [], openPinnedIds: [] });
   }
 

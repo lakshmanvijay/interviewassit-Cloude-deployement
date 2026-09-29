@@ -38,6 +38,7 @@ function PinnedQuestion({ store }) {
       const idx = s.conversation.findIndex(m => m.id === id);
       if (idx === -1) return null; // pinned message no longer exists (e.g. conversation cleared)
       const question = s.conversation[idx];
+      if (question.hidden) return null;
       const answer = s.conversation.slice(idx + 1).find(m => m.role === 'assistant') || null;
       return { id, question, answer };
     })

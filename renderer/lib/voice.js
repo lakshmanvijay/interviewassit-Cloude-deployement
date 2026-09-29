@@ -2,25 +2,17 @@ const { ipcRenderer } = require('electron');
 const path = require('path');
 const { pathToFileURL } = require('url');
 const { connectSttSession } = require('./sttSocket');
-const { scrollElIntoTop } = require('./scroll');
 
 // audioWorklet.addModule() needs a fetchable URL, not a require()'d module —
 // resolved once here relative to this file. See pcm-worklet-processor.js.
 const PCM_WORKLET_URL = pathToFileURL(path.join(__dirname, 'pcm-worklet-processor.js')).href;
 
 const VOICE_THRESHOLD  = 15;
-const SILENCE_MS_SHORT = 800;
+const SILENCE_MS_SHORT = 1200;
+const SPEECH_ATTACK_MS = 250;
+const MIN_VOICED_MS = 450;
+const PRE_ROLL_MS = 500;
 const SILENCE_MS_LONG  = 1800;
-// Guards only against a same-tick race re-opening a session, not real VAD
-// chatter — vadLoop's own silence-timer already prevents that (a noise blip
-// cancels via clearTimeout(silenceTimer) before isSpeaking ever flips back
-// to false, so it never reaches beginUtterance() at all). This used to be
-// 1000ms, which was long enough to silently drop an entire follow-up
-// question asked within a second of the previous one ending — beginUtterance
-// would skip opening a session with no fallback, and the whole utterance
-// (however long) transcribed to nothing.
-const MIN_STT_INTERVAL_MS = 300;
-
 const NOISE_PHRASES = [
   'thank you', 'thanks', 'thank you.', 'thanks.', 'thank you!',
   'mm-hmm', 'mm-hmm.', 'mmm', 'mm', 'hmm', 'uh', 'um',
@@ -28,6 +20,19 @@ const NOISE_PHRASES = [
   'subscribe', 'like and subscribe', 'see you next time',
   '[blank_audio]', '[silence]', '...',
 ];
+
+// Filter conversational filler before it reaches answer generation. Do not
+// require a question mark: STT often omits punctuation, and prompts such as
+// "Explain purchase orders" are valid interview questions.
+function isNonQuestionSpeech(text) {
+  const words = text.toLowerCase().replace(/[^\p{L}\p{N}'\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+  if (!words) return true;
+  const remainder = words.replace(/^(?:(?:oh|yes|yeah|yep|no|nope|okay|ok|right|sure|maybe|well|hmm|um|uh|like|so|and|actually|basically|i mean|you know|all right|thank you|thanks)\b\s*)+/, '').trim();
+  if (!remainder) return true;
+  // A trailing article/possessive signals unfinished speech, not a request.
+  if (/\b(?:the|a|an|my|your|our|their|i mean|you know)$/.test(remainder)) return true;
+  return /^(?:it|that|this) (?:will|would|can|could) (?:learn|work|do|happen)$/.test(remainder);
+}
 
 function downsampleTo16kPCM16(float32, inputSampleRate) {
   const targetRate = 16000;
@@ -68,12 +73,16 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
   let silenceTimer     = null;
   let vadRafId         = null;
   let speechStartTime  = 0;
-  let lastSttRequestTs = 0;
   let vadFreqBuf = null;
   let vadLastTs  = 0;
   let vadLo      = 0;
   let vadHi      = 0;
   let meterEl    = null;
+  let candidateStart = 0;
+  let audioQueue = [];
+  let queuedSamples = 0;
+  let noiseFloor = 0;
+  let voicedMs = 0;
 
   let lastQuestionAt = 0;
   const CONTINUATION_WINDOW_MS = 4000;
@@ -99,22 +108,6 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
   let liveMsgId = null;
 
   let continuationBase = '';
-
-  function showLiveQuestion(newText) {
-    if (!liveMsgId) return;
-    const id = liveMsgId;
-    const text = continuationBase ? `${continuationBase} ${newText}`.trim() : newText;
-    store.setState(s => {
-      const idx = s.conversation.findIndex(m => m.id === id);
-      if (idx === -1) {
-        return { conversation: [...s.conversation, { id, role: 'user', content: text }] };
-      }
-      if (s.conversation[idx].content === text) return {};
-      const conversation = s.conversation.slice();
-      conversation[idx] = { ...conversation[idx], content: text };
-      return { conversation };
-    });
-  }
 
   function abandonLiveQuestion(id = liveMsgId, base = continuationBase) {
     if (!id) return;
@@ -180,6 +173,7 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
       await startVAD(stream);
 
     } catch (err) {
+      stopListening();
       setVoiceStatus('Capture failed: ' + err.message.slice(0, 45), 'err');
       setTimeout(() => setVoiceStatus('● audio off', ''), 4000);
     }
@@ -202,6 +196,13 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
     if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
     if (audioCtx)  { try { audioCtx.close(); } catch (e) {} audioCtx = null; }
     analyserNode = null; isSpeaking = false;
+    candidateStart = 0;
+    audioQueue = [];
+    queuedSamples = 0;
+    lastQuestionAt = 0;
+    noiseFloor = 0;
+    voicedMs = 0;
+    vadLastTs = 0;
     setVoiceStatus('● audio off', '');
     updateLiveTranscript('');
     abandonLiveQuestion();
@@ -248,51 +249,54 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
     }
 
     const conv = store.getState().conversation;
-    const lastMsg = conv[conv.length - 1];
-    const stillStreaming = !!(lastMsg && lastMsg.role === 'assistant' && lastMsg.streaming);
+    const prevUser = conv.filter(m => m.role === 'user').pop();
     const withinWindow = lastQuestionAt > 0 && (Date.now() - lastQuestionAt) < CONTINUATION_WINDOW_MS;
-    const isContinuation = stillStreaming || withinWindow;
+    // An answer still streaming does not mean the next question belongs to it.
+    const isContinuation = withinWindow && prevUser && !/[.!?]\s*$/.test(prevUser.content);
 
     if (isContinuation) {
-      const userMsgs = conv.filter(m => m.role === 'user');
-      const prevUser = userMsgs[userMsgs.length - 1];
       liveMsgId = prevUser.id;
       continuationBase = prevUser.content;
-      if (onSpeechResumed) onSpeechResumed(liveMsgId);
     } else {
       liveMsgId = 'q_' + Date.now() + '_' + Math.random().toString(36).slice(2);
       continuationBase = '';
     }
-    showLiveQuestion(isContinuation ? '' : '🔊 …');
-
-    const thisLiveId = liveMsgId;
-    scrollElIntoTop(() => document.querySelector(`[data-msg-id="${thisLiveId}"]`));
+    // Reserve an ID privately. App.ask renders only after the finalized
+    // transcript passes duration, noise, and filler checks.
     beginUtterance();
   }
 
   function onAudioProcess(e) {
-    if (!isSpeaking || !sttSession) return;
+    if (!listening || !audioCtx) return;
     const pcm16 = downsampleTo16kPCM16(e.data, audioCtx.sampleRate);
-    sttSession.sendAudio(pcm16.buffer);
+    if (isSpeaking && sttSession) {
+      sttSession.sendAudio(pcm16.buffer);
+      return;
+    }
+    // Preserve the first syllable during speech detection and audio arriving
+    // while the previous session finalizes. Bound memory if the server stalls.
+    audioQueue.push(pcm16);
+    queuedSamples += pcm16.length;
+    const limit = 16000 * (isSpeaking ? 10 : PRE_ROLL_MS / 1000);
+    while (queuedSamples > limit && audioQueue.length > 1) {
+      queuedSamples -= audioQueue.shift().length;
+    }
   }
 
   function beginUtterance() {
-    const now = Date.now();
-    if (!continuationBase && now - lastSttRequestTs < MIN_STT_INTERVAL_MS) {
-      showOnScreen('Skipping extra STT request to reduce traffic');
-      return;
-    }
 
     console.log('[voice] utterance started, opening STT session');
-    const session = connectSttSession('en', text => {
-      if (sttSession === session) showLiveQuestion(text);
-    });
+    const session = connectSttSession('en');
     sttSession = session;
+    for (const pcm of audioQueue) session.sendAudio(pcm.buffer);
+    audioQueue = [];
+    queuedSamples = 0;
     session.ready()
       .then(() => {
         if (sttSession === session) console.log('[voice] STT session ready');
       })
       .catch(err => {
+        session.abort();
         if (sttSession === session) sttSession = null;
         console.error('[voice] STT connect failed:', err.message);
         showOnScreen('STT connect failed: ' + err.message);
@@ -320,7 +324,13 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
       return;
     }
 
-    lastSttRequestTs = Date.now();
+    // Silence waiting time must not turn a brief disturbance into speech.
+    if (voicedMs < MIN_VOICED_MS) {
+      session.abort();
+      abandonLiveQuestion(utteranceLiveMsgId, utteranceContinuationBase);
+      updateLiveTranscript('');
+      return;
+    }
 
     console.log('[voice] utterance ended, finalizing STT session');
     const finalizeStart = performance.now();
@@ -346,6 +356,7 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
     if (!listening || !analyserNode) return;
 
     if (ts - vadLastTs < 50) { vadRafId = requestAnimationFrame(vadLoop); return; }
+    const frameMs = vadLastTs ? Math.min(ts - vadLastTs, 100) : 50;
     vadLastTs = ts;
 
     analyserNode.getByteFrequencyData(vadFreqBuf);
@@ -356,18 +367,35 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
 
     setVadMeter(energy);
 
-    if (energy > VOICE_THRESHOLD) {
+    // Track quiet room/system noise only outside speech. A margin above that
+    // floor keeps a steady background hum from repeatedly opening sessions.
+    const threshold = Math.max(VOICE_THRESHOLD, noiseFloor + 10);
+    if (!isSpeaking && !candidateStart && energy <= threshold) {
+      noiseFloor += (Math.min(energy, 30) - noiseFloor) * 0.08;
+    }
+
+    if (energy > threshold) {
+      if (!candidateStart) candidateStart = ts;
+      // Short clicks and isolated noise must not start or extend an utterance.
+      if (ts - candidateStart < SPEECH_ATTACK_MS) {
+        vadRafId = requestAnimationFrame(vadLoop);
+        return;
+      }
       if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
 
       if (!isSpeaking) {
         isSpeaking      = true;
+        voicedMs        = SPEECH_ATTACK_MS;
         speechStartTime = Date.now();
         setVoiceStatus('speaking', 'speaking');
         handleSpeechStart();
+      } else {
+        voicedMs += frameMs;
       }
 
-    } else if (isSpeaking) {
-      if (!silenceTimer) {
+    } else {
+      candidateStart = 0;
+      if (isSpeaking && !silenceTimer) {
         const spokenMs = Date.now() - speechStartTime;
         const waitMs   = spokenMs >= 900 ? SILENCE_MS_SHORT : SILENCE_MS_LONG;
 
@@ -375,7 +403,6 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
           isSpeaking   = false;
           silenceTimer = null;
           setVoiceStatus('capturing internal audio', 'live');
-          showLiveQuestion('Transcribing…');
           console.log(`[voice] silence wait done (${waitMs}ms, spoke ${spokenMs}ms) — finalizing STT`);
           await endUtterance();
         }, waitMs);
@@ -387,11 +414,21 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
 
   async function handleTranscript(rawText, targetLiveMsgId, targetContinuationBase) {
     const text = (rawText || '').trim();
-    const wasContinuation = !!targetContinuationBase;
+    // STT punctuation is unreliable. A fresh question or imperative starts
+    // its own turn even when the preceding transcript has no final period.
+    const startsQuestion = /^(?:(?:okay|ok|yes|yeah|right|well|like|actually|basically|so|and|now|then|also|please|i mean|you know)\b[\s,.:!?]*)*(?:what|why|how|when|where|who|which|can|could|would|should|do|does|did|is|are|was|were|has|have|tell|explain|describe|compare|implement|write|design|walk|give|show|define|discuss|list)\b/i.test(text);
+    const wasContinuation = !!targetContinuationBase && !startsQuestion;
+    if (targetContinuationBase && !wasContinuation) {
+      detachLiveQuestion(targetLiveMsgId);
+      targetLiveMsgId = null;
+    }
     const base = targetContinuationBase;
-    const isNoiseOrEmpty = !text || NOISE_PHRASES.includes(text.toLowerCase()) || text.split(/\s+/).length < 3;
+    const normalized = text.toLowerCase().replace(/[.!?,]+$/g, '').trim();
+    const isNoiseOrEmpty = !text || NOISE_PHRASES.includes(normalized)
+      || /^(?:\[.*\]|\(.*\))$/.test(text)
+      || /^(?:(?:meow|mew|woof|bark|hmm|um|uh)[\s,.!?]*)+$/i.test(text);
 
-    if (isNoiseOrEmpty && !wasContinuation) {
+    if (isNoiseOrEmpty || isNonQuestionSpeech(text)) {
       console.log('[voice] transcript discarded as empty/noise:', JSON.stringify(text));
       if (listening) setVoiceStatus('capturing internal audio', 'live');
       abandonLiveQuestion(targetLiveMsgId, base);
@@ -399,13 +436,17 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
     }
 
     const combinedText = wasContinuation
-      ? (isNoiseOrEmpty ? base : `${base} ${text}`.trim())
+      ? `${base} ${text}`.trim()
       : text;
 
     console.log('[voice] asking:', JSON.stringify(combinedText), wasContinuation ? '(continuation)' : '');
     lastQuestionAt = Date.now();
     const liveId = detachLiveQuestion(targetLiveMsgId);
-    await onTranscript(combinedText, liveId, wasContinuation);
+    if (wasContinuation && store.getState().autoAsk && onSpeechResumed) onSpeechResumed(liveId);
+    // Answer generation can take seconds; it must never block audio intake.
+    Promise.resolve(onTranscript(combinedText, liveId, wasContinuation)).catch(err => {
+      showOnScreen('Question failed: ' + err.message);
+    });
     if (listening) setVoiceStatus('capturing internal audio', 'live');
   }
 

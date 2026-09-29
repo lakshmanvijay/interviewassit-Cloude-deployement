@@ -4,7 +4,7 @@
 // pressing a shortcut behaves identically to clicking the corresponding
 // button.
 function getCurrentQuestionId(store) {
-  const lastUser = [...store.getState().conversation].reverse().find(m => m.role === 'user');
+  const lastUser = [...store.getState().conversation].reverse().find(m => m.role === 'user' && !m.hidden);
   return lastUser ? lastUser.id : null;
 }
 
@@ -17,7 +17,7 @@ function pinCurrentQuestion(store) {
 
 // Pin a specific question, including an earlier one in the conversation.
 function pinQuestion(store, id) {
-  if (!store.getState().conversation.some(m => m.id === id && m.role === 'user')) return;
+  if (!store.getState().conversation.some(m => m.id === id && m.role === 'user' && !m.hidden)) return;
   const { pinnedIds: ids, openPinnedIds: open } = store.getState();
   if (ids.includes(id)) {
     if (!open.includes(id)) store.setState({ openPinnedIds: [...open, id] });

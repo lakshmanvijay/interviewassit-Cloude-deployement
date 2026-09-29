@@ -18,6 +18,7 @@ let pingTimer = null;
 let reconnectAttempt = 0;
 let reconnectTimer = null;
 let intentionallyClosed = false;
+let connectionEpoch = 0;
 
 // id -> { resolve, reject, onDelta, acc, timeoutTimer }
 const pending = new Map();
@@ -38,28 +39,39 @@ function scheduleReconnect() {
     reconnectTimer = null;
     // Only reconnect if we're still logged in — a logout in the meantime
     // means there's no token to reconnect with.
-    const token = await ipcRenderer.invoke('get-session-token');
-    if (token) connect().catch(() => {});
+    try {
+      const token = await ipcRenderer.invoke('get-session-token');
+      if (token && !intentionallyClosed) connect().catch(() => {});
+    } catch (e) { scheduleReconnect(); }
   }, delay);
 }
 
 function connect() {
+  if (connectPromise) return connectPromise;
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
     return connectPromise;
   }
 
   intentionallyClosed = false;
+  const epoch = connectionEpoch;
   connectPromise = (async () => {
     const [token, wsUrl] = await Promise.all([
       ipcRenderer.invoke('get-session-token'),
       ipcRenderer.invoke('get-ws-url'),
     ]);
+    if (epoch !== connectionEpoch) throw new Error('Signed out');
     if (!token || !wsUrl) throw new Error('Not signed in');
 
     await new Promise((resolve, reject) => {
       const socket = new WebSocket(`${wsUrl}?token=${encodeURIComponent(token)}`);
+      ws = socket;
+      const handshakeTimer = setTimeout(() => {
+        reject(new Error('WebSocket connection timed out'));
+        socket.close();
+      }, 10000);
 
       socket.onopen = () => {
+        clearTimeout(handshakeTimer);
         ws = socket;
         reconnectAttempt = 0;
         clearInterval(pingTimer);
@@ -76,7 +88,8 @@ function connect() {
 
         if (msg.type === 'chunk' && p) {
           clearTimeout(p.timeoutTimer);
-          p.acc += msg.content;
+          p.timeoutTimer = setTimeout(p.expire, p.timeoutMs);
+          p.acc += typeof msg.content === 'string' ? msg.content : '';
           p.onDelta(p.acc);
         } else if (msg.type === 'done' && p) {
           clearTimeout(p.timeoutTimer);
@@ -91,6 +104,7 @@ function connect() {
       };
 
       socket.onerror = () => {
+        clearTimeout(handshakeTimer);
         // The 'close' handler (below) fires right after and does the actual
         // cleanup/reconnect — this just makes sure connect() rejects if the
         // very first handshake fails.
@@ -98,6 +112,9 @@ function connect() {
       };
 
       socket.onclose = () => {
+        clearTimeout(handshakeTimer);
+        reject(new Error('WebSocket connection closed'));
+        if (ws !== socket) return;
         clearInterval(pingTimer);
         if (ws === socket) ws = null;
         // A question mid-stream when the socket drops is NOT retried — the
@@ -107,12 +124,13 @@ function connect() {
         if (!intentionallyClosed) scheduleReconnect();
       };
     });
-  })();
+  })().finally(() => { if (epoch === connectionEpoch) connectPromise = null; });
 
   return connectPromise;
 }
 
 function disconnect() {
+  connectionEpoch++;
   intentionallyClosed = true;
   clearInterval(pingTimer);
   clearTimeout(reconnectTimer);
@@ -150,19 +168,26 @@ async function askBackend(question, onDelta, provider, images, displayQuestion) 
   const timeoutMs = images && images.length ? VISION_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
 
   const promise = new Promise((resolve, reject) => {
-    const timeoutTimer = setTimeout(() => {
+    const expire = () => {
       pending.delete(id);
-      ws.send(JSON.stringify({ type: 'cancel', id }));
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try { ws.send(JSON.stringify({ type: 'cancel', id })); } catch (e) {}
+      }
       reject(new Error('The model is taking longer than expected. The service may be busy — please wait a moment and try again.'));
-    }, timeoutMs);
+    };
+    const timeoutTimer = setTimeout(expire, timeoutMs);
 
-    pending.set(id, { resolve, reject, onDelta, acc: '', timeoutTimer });
+    pending.set(id, { resolve, reject, onDelta, acc: '', timeoutTimer, timeoutMs, expire });
 
     const payload = { type: 'question', id, question };
     if (displayQuestion) payload.displayQuestion = displayQuestion;
     if (provider) payload.provider = provider;
     if (images && images.length) payload.images = images;
-    ws.send(JSON.stringify(payload));
+    try { ws.send(JSON.stringify(payload)); } catch (err) {
+      clearTimeout(timeoutTimer);
+      pending.delete(id);
+      reject(err);
+    }
   });
 
   return { id, promise };

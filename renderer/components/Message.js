@@ -22,9 +22,9 @@ function MessageImpl({ store, id }) {
   const questionNumber = useStoreSlice(store, s => {
     const msg = s.conversation.find(m => m.id === id);
     if (!msg || msg.role !== 'user') return null;
-    return s.conversation.filter(m => m.role === 'user').indexOf(msg) + 1;
+    return s.conversation.filter(m => m.role === 'user' && !m.hidden).indexOf(msg) + 1;
   });
-  if (!message) return null;
+  if (!message || message.hidden) return null;
 
   const { role, content, streaming } = message;
   const isAssistant = role === 'assistant';
@@ -47,6 +47,7 @@ function MessageImpl({ store, id }) {
               >📌 ${pinned ? 'Pinned' : 'Pin'}</button>
             </div>`
           : html`<div class="message-content ${isAssistant && streaming ? 'streaming' : ''}">${content}</div>`}
+
     </div>
   `;
 }
