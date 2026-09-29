@@ -21,6 +21,16 @@ const NOISE_PHRASES = [
   '[blank_audio]', '[silence]', '...',
 ];
 
+// The STT session is English-only. Reject other scripts and sound-only
+// captions as a second guard. Latin letters alone cannot prove English:
+// language detection must come from the speech service for that case.
+function isUnsupportedSpeech(text) {
+  const letters = text.match(/\p{L}/gu) || [];
+  if (!letters.length || letters.some(letter => !/\p{Script=Latin}/u.test(letter))) return true;
+  const words = text.toLowerCase().replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  return /^(?:(?:background|sound|sounds|of|noise|noises|music|instrumental|silence|inaudible|unintelligible|speech|cough|coughing|sneeze|sneezing|laugh|laughing|laughter|chuckle|chuckling|breath|breathing|sigh|sighing|applause|clapping|beep|beeping|buzz|buzzing|ringing|humming|hmm|mmm|um|uh|ah|oh|ha|haha|meow|mew|woof|bark|barking)(?:\s+|$))+$/.test(words);
+}
+
 // Filter conversational filler before it reaches answer generation. Do not
 // require a question mark: STT often omits punctuation, and prompts such as
 // "Explain purchase orders" are valid interview questions.
@@ -251,8 +261,9 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
     const conv = store.getState().conversation;
     const prevUser = conv.filter(m => m.role === 'user').pop();
     const withinWindow = lastQuestionAt > 0 && (Date.now() - lastQuestionAt) < CONTINUATION_WINDOW_MS;
-    // An answer still streaming does not mean the next question belongs to it.
-    const isContinuation = withinWindow && prevUser && !/[.!?]\s*$/.test(prevUser.content);
+    // A quick resumption extends the same question, even if STT inserted
+    // punctuation at the pause. Longer gaps start a new question.
+    const isContinuation = withinWindow && prevUser;
 
     if (isContinuation) {
       liveMsgId = prevUser.id;
@@ -414,22 +425,17 @@ function createVoiceController({ store, onTranscript, showOnScreen, onSpeechResu
 
   async function handleTranscript(rawText, targetLiveMsgId, targetContinuationBase) {
     const text = (rawText || '').trim();
-    // STT punctuation is unreliable. A fresh question or imperative starts
-    // its own turn even when the preceding transcript has no final period.
-    const startsQuestion = /^(?:(?:okay|ok|yes|yeah|right|well|like|actually|basically|so|and|now|then|also|please|i mean|you know)\b[\s,.:!?]*)*(?:what|why|how|when|where|who|which|can|could|would|should|do|does|did|is|are|was|were|has|have|tell|explain|describe|compare|implement|write|design|walk|give|show|define|discuss|list)\b/i.test(text);
-    const wasContinuation = !!targetContinuationBase && !startsQuestion;
-    if (targetContinuationBase && !wasContinuation) {
-      detachLiveQuestion(targetLiveMsgId);
-      targetLiveMsgId = null;
-    }
+    // Speech-start timing owns turn boundaries. A continued multi-part
+    // question can begin with "and how", "what", or "explain" too.
+    const wasContinuation = !!targetContinuationBase;
     const base = targetContinuationBase;
     const normalized = text.toLowerCase().replace(/[.!?,]+$/g, '').trim();
     const isNoiseOrEmpty = !text || NOISE_PHRASES.includes(normalized)
       || /^(?:\[.*\]|\(.*\))$/.test(text)
       || /^(?:(?:meow|mew|woof|bark|hmm|um|uh)[\s,.!?]*)+$/i.test(text);
 
-    if (isNoiseOrEmpty || isNonQuestionSpeech(text)) {
-      console.log('[voice] transcript discarded as empty/noise:', JSON.stringify(text));
+    if (isNoiseOrEmpty || isUnsupportedSpeech(text) || isNonQuestionSpeech(text)) {
+      console.log('[voice] transcript discarded as unsupported speech/noise:', JSON.stringify(text));
       if (listening) setVoiceStatus('capturing internal audio', 'live');
       abandonLiveQuestion(targetLiveMsgId, base);
       return;

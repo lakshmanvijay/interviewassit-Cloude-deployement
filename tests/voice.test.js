@@ -4,15 +4,16 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 
-test('fresh questions do not merge into unpunctuated previous speech', async () => {
+test('quick continuations merge even when they start with question words', async () => {
   for (const text of ['Why?', 'What is inheritance', 'Explain interfaces', 'And how does it work',
     'Like, what is Java?', 'Well, actually, explain interfaces', 'Okay. What is SQL?',
     'Please walk me through dependency injection', 'Give an example', 'Define polymorphism']) {
     const h = harness();
     await h.controller.handleTranscript(text, 'old', 'Explain closures');
-    assert.equal(h.calls[0][0], text);
-    assert.equal(h.calls[0][1], null);
-    assert.equal(h.calls[0][2], false);
+    assert.equal(h.calls[0], 'cancel');
+    assert.equal(h.calls[1][0], `Explain closures ${text}`);
+    assert.equal(h.calls[1][1], 'old');
+    assert.equal(h.calls[1][2], true);
   }
 });
 
@@ -33,12 +34,13 @@ function harness(conversation = [], onTranscript = () => {}) {
       `return { handleTranscript, handleSpeechStart, onAudioProcess, doEndUtterance,
         voiced(ms) { voicedMs = ms; },
         start() { listening = true; isSpeaking = true; audioCtx = { sampleRate: 16000 }; },
-        previous() { lastQuestionAt = Date.now(); } };`);
+        previous(age = 0) { lastQuestionAt = Date.now() - age; } };`);
   const context = {
     require(name) {
       if (name === 'electron') return { ipcRenderer: {} };
       if (name === './scroll') return { scrollElIntoTop() {} };
       if (name === './sttSocket') return { connectSttSession(language, onPartial) {
+        assert.equal(language, 'en');
         const chunks = [];
         chunks.partial = text => { if (onPartial) onPartial(text); };
         sessions.push(chunks);
@@ -105,13 +107,13 @@ test('short real questions are accepted without waiting for answer generation', 
   assert.equal(h.calls[0][0], 'Why?');
 });
 
-test('a completed question is separate even while its answer streams', async () => {
+test('a longer gap starts a new question even while the previous answer streams', async () => {
   const h = harness([
     { id: 'q', role: 'user', content: 'What is Java?' },
     { id: 'a', role: 'assistant', content: '', streaming: true },
   ]);
   h.controller.start();
-  h.controller.previous();
+  h.controller.previous(5000);
   await h.controller.handleSpeechStart();
   assert.equal(h.state().conversation.filter(m => m.role === 'user').length, 1);
   h.controller.voiced(600);
@@ -119,6 +121,51 @@ test('a completed question is separate even while its answer streams', async () 
   assert.equal(h.calls[0][0], 'Why?');
   assert.notEqual(h.calls[0][1], 'q');
   assert.equal(h.calls[0][2], false);
+});
+
+test('non-Latin speech and ordinary sounds cannot submit or replace an answer', async () => {
+  for (const text of ['नमस्ते', 'తెలుగు మాటలు', '你好', 'Explain यह',
+    '12345', '♪ ♫', 'Coughing.', 'Background noise', 'Sound of laughter',
+    'Music', 'Ha ha ha!', 'Beep beep', '[door closes]', '(laughing)']) {
+    for (const base of ['', 'Explain closures']) {
+      const h = harness([
+        { id: 'q', role: 'user', content: base || text },
+        { id: 'a', role: 'assistant', content: 'Existing answer', streaming: true },
+      ]);
+      await h.controller.handleTranscript(text, 'q', base);
+      assert.equal(h.calls.length, 0, text);
+      assert.equal(h.state().conversation.find(m => m.id === 'a').content, 'Existing answer');
+      if (base) assert.equal(h.state().conversation.find(m => m.id === 'q').content, base);
+    }
+  }
+});
+
+test('English technical terms and questions about sounds remain valid', async () => {
+  for (const text of ['Explain noise cancellation', 'How does music streaming work?',
+    'C++', 'C#', 'SQL', 'Node.js', 'Explain naïve Bayes', 'What is UTF-8?']) {
+    const h = harness();
+    await h.controller.handleTranscript(text, 'q', '');
+    assert.equal(h.calls[0][0], text);
+  }
+});
+
+test('resuming after two or three seconds regenerates the same punctuated question', async () => {
+  for (const age of [2000, 3000]) {
+    const h = harness([
+      { id: 'q', role: 'user', content: 'What is Java?' },
+      { id: 'a', role: 'assistant', content: 'Existing answer', streaming: true },
+    ]);
+    h.controller.start();
+    h.controller.previous(age);
+    await h.controller.handleSpeechStart();
+    h.controller.voiced(600);
+    await h.controller.doEndUtterance();
+    assert.equal(h.calls[0], 'cancel');
+    assert.equal(h.calls[1][0], 'What is Java? Why?');
+    assert.equal(h.calls[1][1], 'q');
+    assert.equal(h.calls[1][2], true);
+    assert.equal(h.state().conversation.length, 2);
+  }
 });
 
 test('small sounds and interim guesses never render a loading question', async () => {
